@@ -1,0 +1,39 @@
+para android isntalar el ndk
+cargo install cargo-ndk
+
+para compilar
+cargo ndk -t arm64-v8a build --release  # Para dispositivos 64-bit
+cargo ndk -t armeabi-v7a build --release # Para dispositivos 32-bit más antiguos
+se usa la libreria .so
+
+
+para ios
+rustup target add aarch64-apple-ios
+
+compilar con
+cargo build --target aarch64-apple-ios --release
+se usa la libreria .a
+
+
+para mac
+rustup target add x86_64-apple-darwin
+rustup target add aarch64-apple-darwin
+
+para compilar
+cargo build --target aarch64-apple-darwin --release
+cargo build --target x86_64-apple-darwin --release
+ Se usa la libreria dylib
+
+
+
+para windows
+cargo build --target x86_64-apple-darwin --release
+
+para compilar
+cargo build --target x86_64-pc-windows-msvc --release
+
+
+para linux
+rustup target add x86_64-unknown-linux-gnu
+para ompilar
+cargo build --target x86_64-unknown-linux-gnu --release
