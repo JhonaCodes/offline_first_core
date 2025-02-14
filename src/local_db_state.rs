@@ -9,28 +9,25 @@ pub struct AppDbState{
 
 impl AppDbState{
     pub fn init(name: String) -> Self {
-        // Usar config para asegurarnos que no se cierre
+        // Configuración más robusta según la documentación
         let config = sled::Config::new()
             .path(name)
-            .mode(sled::Mode::HighThroughput)  // Optimizar para rendimiento
-            .flush_every_ms(Some(1000))        // Flush periódico
-            .cache_capacity(1024 * 1024 * 32); // 32MB de caché
+            // Asegurar que los datos persistan
+            .mode(sled::Mode::HighThroughput)
+            // Flush más frecuente
+            .flush_every_ms(Some(1000));
 
         let db = config.open().unwrap();
+        // Forzar un flush inicial
+        db.flush().unwrap();
+
         Self { db }
     }
     pub fn push(&self, model: LocalDbModel) -> Result<LocalDbModel, sled::Error> {
-        // Agregamos un print para debug
-        println!("Pushing model with id: {}", model.id);
-
         let json = serde_json::to_string(&model).unwrap();
         self.db.insert(model.id.clone(), json.as_bytes())?;
-
-        // Verificamos inmediatamente si se guardó
-        if let Some(_) = self.db.get(model.id.clone())? {
-            println!("Model saved successfully ");
-        }
-
+        // Asegurar que se escriba a disco
+        self.db.flush()?;
         Ok(model)
     }
 
@@ -44,7 +41,7 @@ impl AppDbState{
                 println!("Key encontrada: {:?}", String::from_utf8(key.to_vec()));
             }
         }
-
+        
         match self.db.get(id)? {
             Some(bytes) => {
                 println!("Valor encontrado para id {}", id);
@@ -82,7 +79,30 @@ impl AppDbState{
         Ok(models)
     }
     
-    
-    
+
+    pub fn delete_by_id(&self, id: &str) -> Result<bool, sled::Error> {
+        match self.db.remove(id)? {
+            Some(_) => {
+                self.db.flush()?;
+                Ok(true) // Se encontró y eliminó
+            },
+            None => Ok(false) // No se encontró el registro
+        }
+    }
+
+
+    pub fn update(&self, model: LocalDbModel) -> Result<Option<LocalDbModel>, sled::Error>  {
+        // Verificar si existe
+        if self.db.contains_key(&model.id)? {
+            let json = serde_json::to_string(&model).unwrap();
+            self.db.insert(model.id.clone(), json.as_bytes())?;
+            self.db.flush()?;
+            Ok(Some(model))
+        } else {
+            // Podríamos manejar esto de diferentes formas, aquí retornamos el error
+            Ok(None)
+        }
+    }
+
 
 }

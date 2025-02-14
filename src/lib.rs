@@ -10,8 +10,14 @@ use std::os::raw::c_char;
 #[no_mangle]
 pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
     let name_str = unsafe { CStr::from_ptr(name).to_str().unwrap() };
-    // Usar directamente el nombre
-    let state = AppDbState::init(name_str.to_string());
+
+    // Usar una ruta absoluta o relativa consistente
+    let db_path = format!("./{}", name_str);
+    println!("Rust: Creating/Opening database at: {}", db_path);
+
+    let state = AppDbState::init(db_path);
+    println!("Rust: Database initialized");
+
     Box::into_raw(Box::new(state))
 }
 
@@ -102,6 +108,43 @@ pub extern "C" fn get_all(state: *mut AppDbState) -> *const c_char {
 }
 
 
+#[no_mangle]
+pub extern "C" fn update_data(state: *mut AppDbState, json_ptr: *const c_char) -> *const c_char {
+    let state = unsafe { &*state };
+    let json_str = unsafe { CStr::from_ptr(json_ptr).to_str().unwrap() };
+    let model: LocalDbModel = serde_json::from_str(json_str).unwrap();
+
+    match state.update(model) {
+        Ok(Some(updated_model)) => {
+            let json = serde_json::to_string(&updated_model).unwrap();
+            CString::new(json).unwrap().into_raw()
+        },
+        _ => std::ptr::null()
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn delete_by_id(db_state: *mut AppDbState, id: *const c_char) -> bool {
+    // Verificar que los punteros no sean nulos
+    if db_state.is_null() || id.is_null() {
+        return false;
+    }
+
+    // Convertir el puntero de ID a un string de Rust
+    let id_str = unsafe {
+        CStr::from_ptr(id)
+            .to_str()
+            .unwrap_or("No se pudo pasar a String")
+    };
+
+    // Acceder al estado de la base de datos
+    let db_state = unsafe { &mut *db_state };
+
+    // Usar tu implementación existente de delete
+    db_state.delete_by_id(id_str).unwrap_or_else(|_| false)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,29 +155,55 @@ mod tests {
         let state = AppDbState::init("test_db".to_string());
 
         // Crear y guardar un modelo de prueba
-        // let test_model = LocalDbModel {
-        //     id: "1".to_string(),
-        //     hash: "test_hash".to_string(),
-        //     data: serde_json::json!({"test": "data"})
-        // };
-        // 
-        // // Insertar el modelo
-        // state.push(test_model).unwrap();
+        let mut test_model = LocalDbModel {
+            id: "1".to_string(),
+            hash: "test_hash".to_string(),
+            data: serde_json::json!({"test": "data"})
+        };
+        
+        // Insertar el modelo
+        state.push(test_model).unwrap();
         
         // 
         let get_all_data = state.get().unwrap();
         println!("{:?}",get_all_data);
         assert!(get_all_data.first().is_some());
 
-        // Probar get_by_id
-        // let result = state.get_by_id("1").unwrap();
-        // assert!(result.is_some());
-        // 
-        // let found_model = result.unwrap();
-        // assert_eq!(found_model.id, "1");
-        // 
-        // // Probar ID que no existe
-        // let no_result = state.get_by_id("999").unwrap();
-        // assert!(no_result.is_none());
+        //Probar get_by_id
+        let result = state.get_by_id("1").unwrap();
+        assert!(result.is_some());
+        
+        let found_model = result.unwrap();
+        assert_eq!(found_model.id, "1");
+        
+        // Probar ID que no existe
+        let no_result = state.get_by_id("999").unwrap();
+        assert!(no_result.is_none());
+
+        test_model = LocalDbModel {
+            id: "1".to_string(),
+            hash: "test_hash".to_string(),
+            data: serde_json::json!({"test": "datatyt6"})
+        };
+        
+        let update_element = state.update(test_model).unwrap();
+        match update_element {
+            None => {
+                println!("No se encontro elemento");
+            }
+            Some(element) => {
+                println!("Elemetno actualzido {:?}", element);
+            }
+        }
+
+
+        match state.delete_by_id("1") {
+            Ok(was_deleted) => {
+                println!("usuario eliminado {}", was_deleted)
+            }
+            Err(delted_error) => {
+                println!("Error on delete element {:?}", delted_error);
+            }
+        }
     }
 }
