@@ -5,8 +5,6 @@ pub struct AppDbState{
     pub db: Db
 }
 
-
-
 impl AppDbState{
     pub fn init(name: String) -> Self {
         // Configuración más robusta según la documentación
