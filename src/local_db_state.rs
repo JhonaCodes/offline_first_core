@@ -143,12 +143,12 @@ impl AppDbState {
     /// 3. Creating a new database
     /// This is useful when you want to start completely fresh
     /// Returns true if successful
-    pub fn reset_database(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+    pub fn reset_database(&mut self, name: &str) -> Result<bool, Box<dyn std::error::Error>> {
         // Delete the database file
         fs::remove_file(&self.path)?;
 
         // Create a new database
-        let path = Path::new(&self.path);
+        let path = Path::new(name);
         let new_db = Database::create(path)?;
 
         // Initialize the table structure
@@ -160,7 +160,7 @@ impl AppDbState {
 
         // Update our database reference
         self.db = new_db;
-
+        
         Ok(true)
     }
 }

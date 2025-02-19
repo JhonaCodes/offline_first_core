@@ -1,3 +1,4 @@
 /target
 .idea
 .DS_Store
+/database_tested_*

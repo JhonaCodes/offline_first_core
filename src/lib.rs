@@ -1,11 +1,13 @@
 pub mod local_db_model;
 pub mod local_db_state;
+mod test;
 
 use crate::local_db_model::LocalDbModel;
 use crate::local_db_state::AppDbState;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+
 
 #[no_mangle]
 pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
@@ -116,8 +118,7 @@ pub extern "C" fn update_data(state: *mut AppDbState, json_ptr: *const c_char) -
 
     match state.update(model) {
         Ok(Some(updated_model)) => {
-            let json = serde_json::to_string(&updated_model).unwrap();
-            CString::new(json).unwrap().into_raw()
+            CString::new(serde_json::to_string(&updated_model).unwrap()).unwrap().into_raw()
         },
         _ => std::ptr::null()
     }
@@ -144,66 +145,30 @@ pub extern "C" fn delete_by_id(db_state: *mut AppDbState, id: *const c_char) -> 
     db_state.delete_by_id(id_str).unwrap_or_else(|_| false)
 }
 
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_get_by_id() {
-        // Inicializar la DB
-        let state = AppDbState::init("test_db".to_string());
-
-        // Crear y guardar un modelo de prueba
-        let mut test_model = LocalDbModel {
-            id: "1".to_string(),
-            hash: "test_hash".to_string(),
-            data: serde_json::json!({"test": "data"})
-        };
-        
-        // Insertar el modelo
-        state.push(test_model).unwrap();
-        
-        // 
-        let get_all_data = state.get().unwrap();
-        println!("{:?}",get_all_data);
-        assert!(get_all_data.first().is_some());
-
-        //Probar get_by_id
-        let result = state.get_by_id("1").unwrap();
-        assert!(result.is_some());
-        
-        let found_model = result.unwrap();
-        assert_eq!(found_model.id, "1");
-        
-        // Probar ID que no existe
-        let no_result = state.get_by_id("999").unwrap();
-        assert!(no_result.is_none());
-
-        test_model = LocalDbModel {
-            id: "1".to_string(),
-            hash: "test_hash".to_string(),
-            data: serde_json::json!({"test": "datatyt6"})
-        };
-        
-        let update_element = state.update(test_model).unwrap();
-        match update_element {
-            None => {
-                println!("No se encontro elemento");
-            }
-            Some(element) => {
-                println!("Elemetno actualzido {:?}", element);
-            }
+#[no_mangle]
+pub extern "C" fn clear_all_records(db_state:  &AppDbState) -> *const c_char{
+    
+    match db_state.clear_all_records() {
+        Ok(response) => {
+            CString::new(response.to_be_bytes()).unwrap().into_raw()
         }
+        Err(e) => {
+            println!("Rust: Error in clear all records: {:?}", e); // Debug
+            CString::new("Error clearing data").unwrap().into_raw()
+        }
+    }
+}
 
 
-        match state.delete_by_id("1") {
-            Ok(was_deleted) => {
-                println!("usuario eliminado {}", was_deleted)
-            }
-            Err(delted_error) => {
-                println!("Error on delete element {:?}", delted_error);
-            }
+#[no_mangle]
+pub extern "C" fn reset_database(db_state: &mut AppDbState, name: &String) -> *const c_char{
+    match db_state.reset_database(name) {
+        Ok(_) => {
+            CString::new("Database was removed").unwrap().into_raw()
+        },
+        Err(e) => {
+            println!("Rust: Error in reset database: {:?}", e); // Debug
+            CString::new("Error clearing data").unwrap().into_raw()
         }
     }
 }
