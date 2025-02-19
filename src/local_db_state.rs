@@ -1,4 +1,4 @@
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use crate::local_db_model::LocalDbModel;
 use std::path::Path;
 use std::fs;
@@ -115,28 +115,35 @@ impl AppDbState {
     /// Returns the number of records deleted
     /// This is useful when you want to clear data but keep using the same database
     pub fn clear_all_records(&self) -> Result<usize, redb::Error> {
-        let write_txn = self.db.begin_write()?;
-        let count = {
+        let write_txn = self.db.begin_write()?; // Iniciar transacción de escritura
+        let mut count = 0;
+
+        {
             let mut table = write_txn.open_table(MAIN_TABLE)?;
 
-            let keys: Vec<String> = table.iter()?
-                .filter_map(|r| r.ok())
-                .map(|(k, _)| String::from_utf8(Vec::from(k.value())).unwrap())
-                .collect();
-
-            let count = keys.len();
-
-            for key in keys {
-                table.remove(key.as_str())?;
+            if table.is_empty()? {
+                return Ok(0);
             }
 
-            count
-        };
+            let keys: Vec<String> = table
+                .iter()?
+                .filter_map(|entry| entry.ok())
+                .map(|(k, _)| k.value().to_string()) 
+                .collect();
 
-        write_txn.commit()?;
+            for key in keys {
+                if let Err(e) = table.remove(key.as_str()) {
+                    eprintln!("Error eliminando clave: {:?}", e);
+                } else {
+                    count += 1;
+                }
+            }
+        }
+
+        write_txn.commit()?; 
         Ok(count)
     }
-
+    
     /// Completely resets the database by:
     /// 1. Closing the current connection
     /// 2. Deleting the database file
