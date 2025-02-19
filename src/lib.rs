@@ -146,18 +146,19 @@ pub extern "C" fn delete_by_id(db_state: *mut AppDbState, id: *const c_char) -> 
 }
 
 #[no_mangle]
-pub extern "C" fn clear_all_records(db_state:  &AppDbState) -> *const c_char{
-    
+pub extern "C" fn clear_all_records(db_state: &AppDbState) -> *const c_char {
     match db_state.clear_all_records() {
         Ok(response) => {
-            CString::new(response.to_be_bytes()).unwrap().into_raw()
+            let response_str = response.to_string();
+            CString::new(response_str).unwrap().into_raw()
         }
         Err(e) => {
-            println!("Rust: Error in clear all records: {:?}", e); // Debug
+            println!("Rust: Error in clear all records: {:?}", e);
             CString::new("Error clearing data").unwrap().into_raw()
         }
     }
 }
+
 
 
 #[no_mangle]
