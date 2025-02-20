@@ -1,86 +1,86 @@
-# Guía para Configurar cargo-ndk en macOS
+# Guide to Set Up `cargo-ndk` on macOS
 
-## 1. Instalar Herramientas Necesarias
+## 1. Install Necessary Tools
 
 ```bash
-# Instalar Rust (si no lo tienes)
+# Install Rust (if you don't have it)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Instalar cargo-ndk
+# Install cargo-ndk
 cargo install cargo-ndk
 ```
 
-## 2. Instalar Android Studio y NDK
+## 2. Install Android Studio and NDK
 
-1. Descarga e instala Android Studio desde [https://developer.android.com/studio](https://developer.android.com/studio)
-2. Abre Android Studio
-3. Ve a Tools > SDK Manager
-4. Selecciona la pestaña "SDK Tools"
-5. Marca la casilla "NDK (Side by side)"
-6. Haz clic en "Apply" y espera a que se instale
+1. Download and install Android Studio from [https://developer.android.com/studio](https://developer.android.com/studio)
+2. Open Android Studio
+3. Go to Tools > SDK Manager
+4. Select the "SDK Tools" tab
+5. Check the "NDK (Side by side)" box
+6. Click "Apply" and wait for the installation to complete
 
-## 3. Configurar el NDK
+## 3. Configure the NDK
 
-1. Abre la Terminal
-2. Verifica las versiones de NDK instaladas:
+1. Open Terminal
+2. Check which NDK versions are installed:
 ```bash
 ls ~/Library/Android/sdk/ndk
 ```
 
-3. Configura la variable de entorno (copia y pega exactamente):
+3. Set the environment variable (copy and paste exactly):
 ```bash
 export ANDROID_NDK_HOME="$HOME/Library/Android/sdk/ndk/25.1.8937393"
 ```
 
-4. Hazlo permanente (elige UNO según tu terminal):
+4. Make it permanent (choose ONE depending on your terminal):
 
-Para zsh (terminal por defecto en Mac moderno):
+For zsh (default terminal on modern Macs):
 ```bash
 echo 'export ANDROID_NDK_HOME="$HOME/Library/Android/sdk/ndk/25.1.8937393"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-Para bash (terminal más antigua):
+For bash (older terminal):
 ```bash
 echo 'export ANDROID_NDK_HOME="$HOME/Library/Android/sdk/ndk/25.1.8937393"' >> ~/.bash_profile
 source ~/.bash_profile
 ```
 
-5. Verifica que funcionó:
+5. Verify that it worked:
 ```bash
 echo $ANDROID_NDK_HOME
 ```
-Deberías ver la ruta completa del NDK.
+You should see the full path of the NDK.
 
-## 4. Compilar tu Proyecto
+## 4. Build Your Project
 
-1. Ve a la carpeta de tu proyecto:
+1. Go to your project folder:
 ```bash
-cd ruta/de/tu/proyecto
+cd path/to/your/project
 ```
 
-2. Ejecuta:
+2. Run:
 ```bash
 cargo ndk -t armeabi-v7a build --release
 ```
 
-## Solución de Problemas
+## Troubleshooting
 
-Si obtienes algún error:
+If you encounter any errors:
 
-1. Verifica que la variable de entorno está configurada:
+1. Check that the environment variable is set:
 ```bash
 echo $ANDROID_NDK_HOME
 ```
 
-2. Si no ves nada, repite el paso 3.
+2. If nothing shows up, repeat step 3.
 
-3. Prueba con una versión más reciente del NDK cambiando "25.1.8937393" por "28.0.13004108" en los comandos anteriores.
+3. Try using a newer version of the NDK by changing "25.1.8937393" to "28.0.13004108" in the previous commands.
 
-4. Asegúrate de que tu proyecto tiene el archivo `Android.mk` en la carpeta correcta.
+4. Make sure your project has the `Android.mk` file in the correct folder.
 
-## Notas Importantes
+## Important Notes
 
-- No cierres la terminal después de exportar la variable ANDROID_NDK_HOME
-- Si cierras la terminal, la configuración permanente (paso 4) debería mantener la variable configurada
-- Si nada funciona, reinicia tu computadora y prueba de nuevo
+- Do not close the terminal after exporting the `ANDROID_NDK_HOME` variable.
+- If you close the terminal, the permanent configuration (step 4) should keep the variable set.
+- If nothing works, restart your computer and try again.
