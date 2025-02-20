@@ -209,6 +209,9 @@ name = "native_storage"
 crate-type = ["staticlib", "cdylib"]
 ```
 
+## Used in:
+ 1. [Flutter local DB](https://pub.dev/packages/flutter_local_db)
+
 ## Safety Considerations
 
 - All FFI functions are marked with `#[no_mangle]`
