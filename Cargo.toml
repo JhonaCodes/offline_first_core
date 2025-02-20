@@ -1,12 +1,13 @@
 [package]
 name = "offline_first_core"
-version = "0.0.1"
+repository = "https://github.com/JhonaCodes/offline_first_core"
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
 license-file = "LICENSE"
-publish = ["offline_first_core"]
 description="This library is designed as a fast-to-compile core, intended to be used as a foundational library for projects like Flutter, native channels, etc."
 readme="README.MD"
+
 [lib]
 name = "offline_first_core"
 crate-type = ["cdylib", "staticlib"]
