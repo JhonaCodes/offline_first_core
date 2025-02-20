@@ -2,3 +2,6 @@
 .idea
 .DS_Store
 /database_tested_*
+targets
+commands.txt
+compile.dart

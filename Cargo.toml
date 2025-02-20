@@ -8,11 +8,11 @@ name = "offline_first_core"
 crate-type = ["cdylib", "staticlib"]
 
 [profile.release]
-opt-level = 'z'  # Optimizar para tamaño
-lto = true       # Link Time Optimization
+opt-level = 'z'
+lto = true
 codegen-units = 1
-strip = true     # Eliminar símbolos de depuración
-panic = 'abort'  # Remover código de manejo de pánico
+strip = true
+panic = 'abort'
 
 [dependencies]
 redb = "2.4.0"

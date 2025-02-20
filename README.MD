@@ -1,10 +1,16 @@
 # Native Storage Library
 
-A high-performance local storage library written in Rust, designed for FFI (Foreign Function Interface) integration. This library provides a robust key-value storage solution using redb, optimized for embedded systems and mobile applications.
+A high-performance local storage library written in Rust, designed for FFI (Foreign Function Interface) integration. This library provides a robust key-value storage solution using `redb`, optimized for embedded systems and mobile applications.
+
+
+## About This Library
+
+This library is designed as a fast-to-compile core, intended to be used as a foundational library for projects like Flutter, native channels, or embedded systems that require low-level interactions. It provides an initial abstraction layer that simplifies integration, making it easy to build efficient local data management solutions.
+The library exposes a minimal API that helps integrate it as a base for efficient local data storage, enabling fast and easy access to underlying data without adding unnecessary complexity.
 
 ## Features
 
-- 🔋 Embedded key-value storage powered by redb
+- 🔋 Embedded key-value storage powered by `redb`
 - 🔒 ACID compliant transactions
 - 🚀 Zero-copy reads
 - 📱 Optimized for mobile and embedded systems
@@ -71,7 +77,7 @@ db.reset_database()?;
 
 ### Storage Engine
 
-Uses redb with the following configuration:
+Uses `redb` with the following configuration:
 - Key-value storage
 - ACID transactions
 - Single table design
@@ -112,7 +118,79 @@ cargo build --release
 cbindgen --output native_storage.h
 ```
 
-### Integration
+## Cross-Platform Compilation
+
+### Android
+
+#### Prerequisites:
+- Install the Android NDK:
+```bash
+cargo install cargo-ndk
+```
+
+#### Build Commands:
+```bash
+# For 64-bit devices
+cargo ndk -t arm64-v8a build --release
+
+# For 32-bit devices
+cargo ndk -t armeabi-v7a build --release
+```
+- Output: `.so` shared library
+
+### iOS
+
+#### Prerequisites:
+- Add the required target:
+```bash
+rustup target add aarch64-apple-ios
+```
+
+#### Build Command:
+```bash
+cargo build --target aarch64-apple-ios --release
+```
+- Output: `.a` static library
+
+### macOS
+
+#### Prerequisites:
+- Add required targets:
+```bash
+rustup target add x86_64-apple-darwin
+rustup target add aarch64-apple-darwin
+```
+
+#### Build Commands:
+```bash
+cargo build --target aarch64-apple-darwin --release
+cargo build --target x86_64-apple-darwin --release
+```
+- Output: `.dylib` shared library
+
+### Windows
+
+#### Build Command:
+```bash
+cargo build --target x86_64-pc-windows-msvc --release
+```
+- Output: `.dll` shared library
+
+### Linux
+
+#### Prerequisites:
+- Add required target:
+```bash
+rustup target add x86_64-unknown-linux-gnu
+```
+
+#### Build Command:
+```bash
+cargo build --target x86_64-unknown-linux-gnu --release
+```
+- Output: `.so` shared library
+
+## Integration
 
 To integrate with your project:
 
@@ -162,6 +240,14 @@ Contributions are welcome! Please ensure:
 4. Documentation
 5. Test coverage
 
-## License
+## Special Thanks
 
-MIT License
+We would like to extend our special thanks to the creators and contributors of [redDb](https://github.com/cberner/redb) for their incredible work.
+Thank you for your dedication and contribution to the open-source community!
+
+
+## License
+MIT License - see [LICENSE](https://github.com/JhonaCodes/flutter_local_db/LICENSE)
+
+## Author
+Made with ❤️ by [JhonaCode](https://github.com/JhonaCodes)
