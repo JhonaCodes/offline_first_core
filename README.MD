@@ -245,7 +245,7 @@ Contributions are welcome! Please ensure:
 
 ## Special Thanks
 
-We would like to extend our special thanks to the creators and contributors of [redDb](https://github.com/cberner/redb) for their incredible work.
+We would like to extend our special thanks to the creators and contributors of [redb](https://github.com/cberner/redb) for their incredible work.
 Thank you for your dedication and contribution to the open-source community!
 
 
