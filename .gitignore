@@ -5,3 +5,4 @@
 targets
 commands.txt
 compile.dart
+/fix_ios_lib.sh

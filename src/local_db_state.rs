@@ -41,16 +41,13 @@ impl AppDbState {
     }
 
     pub fn get_by_id(&self, id: &str) -> Result<Option<LocalDbModel>, redb::Error> {
-        println!("Searching for id: {}", id);
 
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(MAIN_TABLE)?;
 
         match table.get(id)? {
             Some(bytes) => {
-                println!("Value found for id {}", id);
                 let json_str = String::from_utf8(bytes.value().to_vec()).unwrap();
-                println!("Retrieved JSON: {}", json_str);
                 let model = serde_json::from_str(&json_str).unwrap();
                 Ok(Some(model))
             },
@@ -62,7 +59,6 @@ impl AppDbState {
     }
 
     pub fn get(&self) -> Result<Vec<LocalDbModel>, redb::Error> {
-        println!("Rust: Scanning database");
         let mut models = Vec::new();
 
         let read_txn = self.db.begin_read()?;
@@ -70,8 +66,7 @@ impl AppDbState {
 
         for item in table.iter()? {
             match item {
-                Ok((key, value)) => {
-                    println!("Rust: Found key: {:?}", String::from_utf8(Vec::from(key.value())));
+                Ok((_, value)) => {
                     let json_str = String::from_utf8(Vec::from(value.value())).unwrap();
                     let model: LocalDbModel = serde_json::from_str(&json_str).unwrap();
                     models.push(model);
@@ -79,8 +74,7 @@ impl AppDbState {
                 Err(e) => println!("Rust: Error reading item: {:?}", e)
             }
         }
-
-        println!("Rust: Total models found: {}", models.len());
+        
         Ok(models)
     }
 
@@ -133,7 +127,7 @@ impl AppDbState {
 
             for key in keys {
                 if let Err(e) = table.remove(key.as_str()) {
-                    eprintln!("Error eliminando clave: {:?}", e);
+                    eprintln!("Error on deleting key: {:?}", e);
                 } else {
                     count += 1;
                 }

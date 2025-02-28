@@ -15,7 +15,6 @@ pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
 
     // Usar una ruta absoluta o relativa consistente
     let db_path = format!("./{}", name_str);
-    println!("Rust: Creating/Opening database at: {}", db_path);
 
     let state = AppDbState::init(db_path);
     println!("Rust: Database initialized");
@@ -93,13 +92,9 @@ pub extern "C" fn get_by_id(state: *mut AppDbState, id: *const c_char) -> *const
 #[no_mangle]
 pub extern "C" fn get_all(state: *mut AppDbState) -> *const c_char {
     let state = unsafe { &*state };
-    println!("Rust: Starting get_all"); // Debug
-
     match state.get() {
         Ok(models) => {
-            println!("Rust: Found {} models", models.len()); // Debug
             let json = serde_json::to_string(&models).unwrap();
-            println!("Rust: JSON to send: {}", json); // Debug
             CString::new(json).unwrap().into_raw()
         },
         Err(e) => {

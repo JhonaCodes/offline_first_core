@@ -1,11 +1,16 @@
 [package]
 name = "offline_first_core"
-version = "0.0.1"
+repository = "https://github.com/JhonaCodes/offline_first_core"
+version = "0.1.0"
 edition = "2021"
+license = "MIT"
+license-file = "LICENSE"
+description="This library is designed as a fast-to-compile core, intended to be used as a foundational library for projects like Flutter, native channels, etc."
+readme="README.MD"
 
 [lib]
 name = "offline_first_core"
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["staticlib", "cdylib"]
 
 [profile.release]
 opt-level = 'z'
@@ -13,6 +18,9 @@ lto = true
 codegen-units = 1
 strip = true
 panic = 'abort'
+
+[features]
+static = []
 
 [dependencies]
 redb = "2.4.0"
