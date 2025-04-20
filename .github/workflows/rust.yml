@@ -1,21 +1,135 @@
-name: Rust Tests
+name: Rust Build and Publish
 
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:  # Permite ejecutar el workflow manualmente
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-
+  build:
+    runs-on: macos-latest  # Cambiado a macos para compilar iOS y macOS nativamente
     steps:
       - uses: actions/checkout@v3
-      - name: Build
-        run: cargo build --verbose
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+          targets: aarch64-apple-ios, aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Install Android NDK
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653" --sdk_root=$ANDROID_HOME
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Build for Android
+        run: |
+          export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653
+          cargo ndk -t armeabi-v7a -t arm64-v8a -t x86 -t x86_64 -o ./android-libs build --release
+
+      - name: Build for iOS
+        run: |
+          cargo build --target aarch64-apple-ios --release
+          # Corregir el "install name" para iOS
+          install_name_tool -id "@rpath/liboffline_first_core.dylib" "target/aarch64-apple-ios/release/liboffline_first_core.dylib"
+
+      - name: Build for macOS
+        run: |
+          cargo build --target aarch64-apple-darwin --release
+          cargo build --target x86_64-apple-darwin --release
+          
+          # Corregir los "install names" para macOS
+          install_name_tool -id "@rpath/liboffline_first_core_arm64.dylib" "target/aarch64-apple-darwin/release/liboffline_first_core.dylib"
+          install_name_tool -id "@rpath/liboffline_first_core_x86_64.dylib" "target/x86_64-apple-darwin/release/liboffline_first_core.dylib"
+          
+          # Renombrar las bibliotecas
+          mv "target/aarch64-apple-darwin/release/liboffline_first_core.dylib" "target/aarch64-apple-darwin/release/liboffline_first_core_arm64.dylib"
+          mv "target/x86_64-apple-darwin/release/liboffline_first_core.dylib" "target/x86_64-apple-darwin/release/liboffline_first_core_x86_64.dylib"
+
+      - name: Upload Android libs as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: android-libs
+          path: ./android-libs/**/*
+
+      - name: Upload iOS lib as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ios-lib
+          path: ./target/aarch64-apple-ios/release/liboffline_first_core.dylib
+
+      - name: Upload macOS libs as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: macos-libs
+          path: |
+            ./target/aarch64-apple-darwin/release/liboffline_first_core_arm64.dylib
+            ./target/x86_64-apple-darwin/release/liboffline_first_core_x86_64.dylib
+
       - name: Run tests
         run: cargo test --verbose
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'  # Solo en push a main
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          repository: JhonaCodes/flutter_local_db
+          token: ${{ secrets.FLUTTER_REPO_TOKEN }}  # Token con permisos para el otro repo
+
+      - name: Download Android libs
+        uses: actions/download-artifact@v3
+        with:
+          name: android-libs
+          path: ./tmp-android-libs
+
+      - name: Download iOS lib
+        uses: actions/download-artifact@v3
+        with:
+          name: ios-lib
+          path: ./tmp-ios-lib
+
+      - name: Download macOS libs
+        uses: actions/download-artifact@v3
+        with:
+          name: macos-libs
+          path: ./tmp-macos-libs
+
+      - name: Move files to correct locations
+        run: |
+          # Asegurar que los directorios de destino existen
+          mkdir -p android/src/main/jniLibs/arm64-v8a
+          mkdir -p android/src/main/jniLibs/armeabi-v7a
+          mkdir -p android/src/main/jniLibs/x86
+          mkdir -p android/src/main/jniLibs/x86_64
+          mkdir -p ios/Frameworks
+          mkdir -p macos/Frameworks
+          
+          # Mover archivos Android
+          find ./tmp-android-libs -name "*.so" -type f -exec bash -c 'cp "$0" "android/src/main/jniLibs/$(basename $(dirname "$0"))/liboffline_first_core.so"' {} \;
+          
+          # Mover archivo iOS
+          cp ./tmp-ios-lib/liboffline_first_core.dylib ios/Frameworks/
+          
+          # Mover archivos macOS
+          cp ./tmp-macos-libs/liboffline_first_core_arm64.dylib macos/Frameworks/
+          cp ./tmp-macos-libs/liboffline_first_core_x86_64.dylib macos/Frameworks/
+
+      - name: Commit and push changes
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git add android/src/main/jniLibs ios/Frameworks macos/Frameworks
+          git commit -m "Update native libraries from Rust build [skip ci]" || echo "No changes to commit"
+          git push
