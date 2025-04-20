@@ -187,3 +187,13 @@ pub extern "C" fn reset_database(db_state: &mut AppDbState, name: &String) -> *c
         }
     }
 }
+
+#[no_mangle]
+pub extern "C" fn close_database(db_ptr: *mut AppDbState) {
+    if !db_ptr.is_null() {
+        // Convertir el puntero a Box para tomar propiedad y dejar que se ejecute Drop
+        unsafe {
+            let _ = Box::from_raw(db_ptr);
+        }
+    }
+}
