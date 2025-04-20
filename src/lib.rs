@@ -7,7 +7,7 @@ use crate::local_db_state::AppDbState;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
-use log::info;
+use log::{info, warn};
 
 #[no_mangle]
 pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
@@ -97,20 +97,67 @@ pub extern "C" fn push_data(state: *mut AppDbState, json_ptr: *const c_char) -> 
 
 #[no_mangle]
 pub extern "C" fn get_by_id(state: *mut AppDbState, id: *const c_char) -> *const c_char {
+    // Verificar si state o id son nulos
+    if state.is_null() {
+        warn!("Rust: Null state pointer passed to get_by_id");
+        return std::ptr::null();
+    }
+
+    if id.is_null() {
+        warn!("Rust: Null id pointer passed to get_by_id");
+        return std::ptr::null();
+    }
+
+    // Ahora es seguro desreferenciar
     let state = unsafe { &*state };
-    let id_str = unsafe { CStr::from_ptr(id).to_str().unwrap() };
+
+    // Convertir id a String con manejo de errores
+    let id_str = match unsafe { CStr::from_ptr(id).to_str() } {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Rust: Invalid UTF-8 in id: {:?}", e);
+            return std::ptr::null();
+        }
+    };
 
     match state.get_by_id(id_str) {
         Ok(Some(model)) => {
-            let json = serde_json::to_string(&model).unwrap();
-            CString::new(json).unwrap().into_raw()
+            match serde_json::to_string(&model) {
+                Ok(json) => {
+                    match CString::new(json) {
+                        Ok(c_string) => c_string.into_raw(),
+                        Err(e) => {
+                            warn!("Rust: Error creating CString: {:?}", e);
+                            std::ptr::null()
+                        }
+                    }
+                },
+                Err(e) => {
+                    println!("Rust: Error serializing to JSON: {:?}", e);
+                    std::ptr::null()
+                }
+            }
         },
-        _ => std::ptr::null()
+        Ok(None) => {
+            println!("Rust: No model found with id: {}", id_str);
+            std::ptr::null()
+        },
+        Err(e) => {
+            println!("Rust: Error in get_by_id: {:?}", e);
+            std::ptr::null()
+        }
     }
 }
 
 #[no_mangle]
 pub extern "C" fn get_all(state: *mut AppDbState) -> *const c_char {
+    // Verificar si el puntero es nulo
+    if state.is_null() {
+        println!("Rust: Null state pointer passed to get_all");
+        return std::ptr::null();
+    }
+
+    // Ahora es seguro desreferenciar
     let state = unsafe { &*state };
     match state.get() {
         Ok(models) => {
@@ -118,7 +165,7 @@ pub extern "C" fn get_all(state: *mut AppDbState) -> *const c_char {
             CString::new(json).unwrap().into_raw()
         },
         Err(e) => {
-            println!("Rust: Error in get_all: {:?}", e); // Debug
+            println!("Rust: Error in get_all: {:?}", e);
             std::ptr::null()
         }
     }
@@ -127,6 +174,12 @@ pub extern "C" fn get_all(state: *mut AppDbState) -> *const c_char {
 
 #[no_mangle]
 pub extern "C" fn update_data(state: *mut AppDbState, json_ptr: *const c_char) -> *const c_char {
+    // Verificar si los punteros son nulos
+    if state.is_null() || json_ptr.is_null() {
+        return std::ptr::null();
+    }
+
+    // Mantener el resto exactamente igual
     let state = unsafe { &*state };
     let json_str = unsafe { CStr::from_ptr(json_ptr).to_str().unwrap() };
     let model: LocalDbModel = serde_json::from_str(json_str).unwrap();
