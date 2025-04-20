@@ -190,6 +190,21 @@ pub extern "C" fn reset_database(db_state: &mut AppDbState, name: &String) -> *c
 }
 
 #[no_mangle]
+pub extern "C" fn close_database(db_ptr: *mut AppDbState) -> *mut bool {
+    if !db_ptr.is_null() {
+        unsafe {
+            let _ = Box::from_raw(db_ptr);
+            // Crear un nuevo booleano en el heap para devolver
+            let success = Box::new(true);
+            Box::into_raw(success)
+        }
+    } else {
+        let failure = Box::new(false);
+        Box::into_raw(failure)
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn is_database_open(db_ptr: *const AppDbState) -> *mut bool {
     if !db_ptr.is_null() {
         unsafe {
