@@ -1,7 +1,8 @@
-use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{Database, DatabaseError, ReadableTable, ReadableTableMetadata, StorageError, TableDefinition};
 use crate::local_db_model::LocalDbModel;
 use std::path::Path;
 use std::fs;
+use log::{info, warn};
 
 // Table definition for redb - required for key-value storage
 const MAIN_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("main");
@@ -12,21 +13,65 @@ pub struct AppDbState {
 }
 
 impl AppDbState {
-    pub fn init(name: String) -> Self {
+    pub fn init(name: String) -> Result<Self, DatabaseError> {
         let path = Path::new(&name);
-        let db = Database::create(path).unwrap();
 
-        // Create table if it doesn't exist
-        {
-            let write_txn = db.begin_write().unwrap();
-            write_txn.open_table(MAIN_TABLE).unwrap();
-            write_txn.commit().unwrap();
+        // Abrir la base de datos o crearla si no existe
+        let db = match Database::open(path) {
+            Ok(response) => {
+                info!("Opened existing database at {}", name);
+                response
+            }
+            Err(_) => {
+                info!("Creating new database at {}", name);
+                match Database::create(path) {
+                    Ok(response) => {
+                        info!("Database created");
+                        response
+                    }
+                    Err(err) => {
+                        warn!("Error on creating database: {}", err);
+                        return Err(DatabaseError::Storage(StorageError::Corrupted(String::from("Error when trying to create database"))));
+                    }
+                }
+            }
+        };
+
+        // Iniciar transacción de escritura
+        let write_txn = match db.begin_write() {
+            Ok(txn) => txn,
+            Err(err) => { 
+                warn!("Error beginning write transaction: {}", err);
+                return Err(DatabaseError::Storage(StorageError::Corrupted(String::from("Error beginning write transaction"))));
+            }
+        };
+
+        // Abrir o crear tabla
+        match write_txn.open_table(MAIN_TABLE) {
+            Ok(_) => {
+                info!("Table opened successfully")
+            },
+            Err(err) => {
+                warn!("Error opening table: {}", err);
+                return Err(DatabaseError::Storage(StorageError::Corrupted(String::from("Error opening table"))));
+            }
         }
 
-        Self {
+        // Confirmar transacción
+        match write_txn.commit() {
+            Ok(_) => {
+                info!("Transaction committed successfully")
+            },
+            Err(err) => {
+                warn!("Error committing transaction: {}", err);
+                return Err(DatabaseError::Storage(StorageError::Corrupted(String::from("Error committing transaction"))));
+            }
+        }
+        
+        Ok(Self {
             db,
             path: name
-        }
+        })
     }
 
     pub fn push(&self, model: LocalDbModel) -> Result<LocalDbModel, redb::Error> {
