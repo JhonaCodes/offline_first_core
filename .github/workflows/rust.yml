@@ -5,24 +5,22 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-  workflow_dispatch:  # Permite ejecutar el workflow manualmente
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
-    runs-on: macos-latest  # Cambiado a macos para compilar iOS y macOS nativamente
+    runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Set up Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
-          targets: aarch64-apple-ios, aarch64-apple-darwin, x86_64-apple-darwin
+      # Configuración de Rust
+      - name: Install Rust
+        run: |
+          rustup update stable
+          rustup target add aarch64-apple-ios aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Install Android NDK
         run: |
@@ -56,19 +54,19 @@ jobs:
           mv "target/x86_64-apple-darwin/release/liboffline_first_core.dylib" "target/x86_64-apple-darwin/release/liboffline_first_core_x86_64.dylib"
 
       - name: Upload Android libs as artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: android-libs
           path: ./android-libs/**/*
 
       - name: Upload iOS lib as artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ios-lib
           path: ./target/aarch64-apple-ios/release/liboffline_first_core.dylib
 
       - name: Upload macOS libs as artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: macos-libs
           path: |
@@ -81,27 +79,27 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'  # Solo en push a main
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           repository: JhonaCodes/flutter_local_db
-          token: ${{ secrets.FLUTTER_REPO_TOKEN }}  # Token con permisos para el otro repo
+          token: ${{ secrets.FLUTTER_REPO_TOKEN }}
 
       - name: Download Android libs
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: android-libs
           path: ./tmp-android-libs
 
       - name: Download iOS lib
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: ios-lib
           path: ./tmp-ios-lib
 
       - name: Download macOS libs
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: macos-libs
           path: ./tmp-macos-libs
