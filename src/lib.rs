@@ -8,18 +8,37 @@ use crate::local_db_state::AppDbState;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
-
 #[no_mangle]
 pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
-    let name_str = unsafe { CStr::from_ptr(name).to_str().unwrap() };
+    // Proteger contra punteros nulos
+    if name.is_null() {
+        eprintln!("Rust: NULL pointer passed to create_db");
+        return std::ptr::null_mut();
+    }
+
+    // Convertir C string a Rust string de manera segura
+    let name_str = match unsafe { CStr::from_ptr(name).to_str() } {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Rust: Invalid UTF-8 in database name: {}", e);
+            return std::ptr::null_mut();
+        }
+    };
 
     // Usar una ruta absoluta o relativa consistente
     let db_path = format!("./{}", name_str);
 
-    let state = AppDbState::init(db_path);
-    println!("Rust: Database initialized");
-
-    Box::into_raw(Box::new(state))
+    // Inicializar la base de datos y manejar el resultado
+    match AppDbState::init(db_path) {
+        Ok(state) => {
+            println!("Rust: Database initialized successfully");
+            Box::into_raw(Box::new(state))
+        }
+        Err(err) => {
+            eprintln!("Rust: Failed to initialize database: {}", err);
+            std::ptr::null_mut()
+        }
+    }
 }
 
 #[no_mangle]
