@@ -10,6 +10,7 @@ const MAIN_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("main");
 pub struct AppDbState {
     db: Database,
     path: String, // Store the path for potential database reset
+    is_open: bool
 }
 
 impl AppDbState {
@@ -85,7 +86,8 @@ impl AppDbState {
         // At this point, the DB is open and ready for operations
         Ok(Self {
             db,
-            path: name
+            path: name,
+            is_open: true
         })
     }
 
@@ -223,6 +225,11 @@ impl AppDbState {
         self.db = new_db;
         
         Ok(true)
+    }
+
+
+    pub fn is_open(&self) -> bool {
+        self.is_open
     }
     
 }

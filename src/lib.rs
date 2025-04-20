@@ -7,6 +7,7 @@ use crate::local_db_state::AppDbState;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use log::info;
 
 #[no_mangle]
 pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
@@ -189,11 +190,17 @@ pub extern "C" fn reset_database(db_state: &mut AppDbState, name: &String) -> *c
 }
 
 #[no_mangle]
-pub extern "C" fn close_database(db_ptr: *mut AppDbState) {
+pub extern "C" fn is_database_open(db_ptr: *const AppDbState) -> *mut bool {
     if !db_ptr.is_null() {
-        // Convertir el puntero a Box para tomar propiedad y dejar que se ejecute Drop
         unsafe {
-            let _ = Box::from_raw(db_ptr);
+            let db_state = &*db_ptr;
+            
+            // Devolver el resultado como un puntero
+            let result = Box::new(db_state.is_open());
+            Box::into_raw(result)
         }
+    } else {
+        let result = Box::new(false);
+        Box::into_raw(result)
     }
 }
