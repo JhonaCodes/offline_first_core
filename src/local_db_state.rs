@@ -16,20 +16,28 @@ impl AppDbState {
     pub fn init(name: String) -> Result<Self, DatabaseError> {
         let path = Path::new(&name);
 
-        // Abrir la base de datos o crearla si no existe
+        // Open existing database or create it if it doesn't exist
+        // If the database is already opened by another process, the creation attempt will also fail
+        // and an appropriate error will be returned
         let db = match Database::open(path) {
             Ok(response) => {
+                // Database existed and was opened successfully
                 info!("Opened existing database at {}", name);
                 response
             }
             Err(_) => {
+                // Error opening the DB, trying to create it
+                // This can happen if the DB doesn't exist or if it's already opened by another process
                 info!("Creating new database at {}", name);
                 match Database::create(path) {
                     Ok(response) => {
+                        // Database was created successfully
                         info!("Database created");
                         response
                     }
                     Err(err) => {
+                        // Error creating the DB: could be due to permissions, insufficient space,
+                        // or because the DB already exists and is opened by another process
                         warn!("Error on creating database: {}", err);
                         return Err(DatabaseError::Storage(StorageError::Corrupted(String::from("Error when trying to create database"))));
                     }
@@ -37,16 +45,20 @@ impl AppDbState {
             }
         };
 
-        // Iniciar transacción de escritura
+        // Start a write transaction
+        // This operation can fail if the DB has write restrictions
+        // or if there are concurrency issues with other transactions
         let write_txn = match db.begin_write() {
             Ok(txn) => txn,
-            Err(err) => { 
+            Err(err) => {
                 warn!("Error beginning write transaction: {}", err);
                 return Err(DatabaseError::Storage(StorageError::Corrupted(String::from("Error beginning write transaction"))));
             }
         };
 
-        // Abrir o crear tabla
+        // Open or create the main table
+        // If the table already exists, it will be opened
+        // If it doesn't exist, it will be automatically created
         match write_txn.open_table(MAIN_TABLE) {
             Ok(_) => {
                 info!("Table opened successfully")
@@ -57,7 +69,8 @@ impl AppDbState {
             }
         }
 
-        // Confirmar transacción
+        // Commit the transaction to apply changes to the DB
+        // This ensures the table is available for future operations
         match write_txn.commit() {
             Ok(_) => {
                 info!("Transaction committed successfully")
@@ -67,7 +80,9 @@ impl AppDbState {
                 return Err(DatabaseError::Storage(StorageError::Corrupted(String::from("Error committing transaction"))));
             }
         }
-        
+
+        // Return the AppDbState instance
+        // At this point, the DB is open and ready for operations
         Ok(Self {
             db,
             path: name

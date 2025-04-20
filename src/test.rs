@@ -1,9 +1,11 @@
 #[cfg(test)]
 pub mod tests {
+    use std::path::Path;
     use crate::local_db_model::LocalDbModel;
     use crate::local_db_state::AppDbState;
     use std::time::{SystemTime, UNIX_EPOCH};
     use log::{warn};
+    use redb::DatabaseError;
 
     // Función helper para crear modelos de prueba
     fn create_test_model(id: &str, data: Option<serde_json::Value>) -> LocalDbModel {
@@ -90,6 +92,79 @@ pub mod tests {
             Err(_) => {
                 warn!("Error on testing")
             }
+        }
+    }
+    
+    #[test]
+    fn test_db_already_open() {
+        // Use a fixed database name to ensure we're testing the same database
+        let db_name = "database_tested_already_open";
+
+        // Clean up: Remove the database if it exists from previous test runs
+        let path = Path::new(db_name);
+        if path.exists() {
+            std::fs::remove_file(path).expect("Failed to remove existing test database");
+        }
+
+        // First instance - should create the database
+        let first_instance = AppDbState::init(db_name.to_string());
+        assert!(first_instance.is_ok(), "First instance should be created successfully");
+        let first_db = first_instance.unwrap();
+
+        println!("First instance opened successfully");
+
+        // Second instance - attempt to open the same database while first is still open
+        let second_instance = AppDbState::init(db_name.to_string());
+
+        // Check if we were able to open a second instance
+        if second_instance.is_ok() {
+            println!("Second instance opened successfully - database supports multiple connections");
+
+            // Test writing to the first instance
+            let model_1 = create_test_model("test1", None);
+            let result_1 = first_db.push(model_1.clone());
+            println!("Write to first instance: {}", result_1.is_ok());
+
+            // Test writing to the second instance
+            let second_db = second_instance.as_ref().unwrap();
+            let model_2 = create_test_model("test2", None);
+            let result_2 = second_db.push(model_2.clone());
+            println!("Write to second instance: {}", result_2.is_ok());
+
+            // Test cross-instance data visibility (if each instance can read data written by the other)
+            if result_1.is_ok() && result_2.is_ok() {
+                // Try to read from first instance what was written by second
+                let read_1 = first_db.get_by_id("test2");
+                println!("First instance can read data from second: {}",
+                         read_1.is_ok() && read_1.unwrap().is_some());
+
+                // Try to read from second instance what was written by first
+                let read_2 = second_db.get_by_id("test1");
+                println!("Second instance can read data from first: {}",
+                         read_2.is_ok() && read_2.unwrap().is_some());
+            }
+        } else {
+            println!("Second instance failed to open the same database");
+
+            // Analyze the specific error type
+            match second_instance.err().unwrap() {
+                DatabaseError::Storage(storage_err) => {
+                    println!("Storage error: {:?}", storage_err);
+                },
+                _ => {
+                    println!("Other type of error");
+                }
+            }
+
+            // Verify that the first instance still works
+            let model = create_test_model("test1", None);
+            let result = first_db.push(model);
+            println!("First instance still functioning: {}", result.is_ok());
+        }
+
+        // Clean up: Remove the test database
+        if path.exists() {
+            std::fs::remove_file(path).expect("Failed to clean up test database");
         }
     }
 
