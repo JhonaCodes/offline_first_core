@@ -51,6 +51,11 @@ jobs:
           
           mv "target/aarch64-apple-darwin/release/liboffline_first_core.dylib" "target/aarch64-apple-darwin/release/liboffline_first_core_arm64.dylib"
           mv "target/x86_64-apple-darwin/release/liboffline_first_core.dylib" "target/x86_64-apple-darwin/release/liboffline_first_core_x86_64.dylib"
+          
+          # Verificar archivos de macOS
+          echo "Verificando archivos de macOS:"
+          ls -la ./target/aarch64-apple-darwin/release/
+          ls -la ./target/x86_64-apple-darwin/release/
 
       - name: Run tests
         run: cargo test --verbose
@@ -60,12 +65,14 @@ jobs:
         with:
           name: android-libs
           path: ./android-libs/**/*
+          if-no-files-found: error
 
       - name: Upload iOS lib
         uses: actions/upload-artifact@v4
         with:
           name: ios-lib
           path: ./target/aarch64-apple-ios/release/liboffline_first_core.dylib
+          if-no-files-found: error
 
       - name: Upload macOS libs
         uses: actions/upload-artifact@v4
@@ -74,6 +81,7 @@ jobs:
           path: |
             ./target/aarch64-apple-darwin/release/liboffline_first_core_arm64.dylib
             ./target/x86_64-apple-darwin/release/liboffline_first_core_x86_64.dylib
+          if-no-files-found: warn
 
   publish:
     needs: [build-apple-android]
@@ -100,24 +108,63 @@ jobs:
           mkdir -p ios/Frameworks
           mkdir -p macos/Frameworks
           
-          # Verificar contenido de los directorios de artefactos
-          echo "Android libs directory structure:"
-          find ./tmp-artifacts/android-libs -type f | sort
+          # Verificar estructura de todos los directorios de artefactos
+          echo "All artifact directories structure:"
+          find ./tmp-artifacts -type f | sort
           
           # Mover archivos Android
           find ./tmp-artifacts/android-libs -name "*.so" -type f -exec bash -c 'cp "$0" "android/src/main/jniLibs/$(basename $(dirname "$0"))/liboffline_first_core.so"' {} \;
           
           # Mover archivo iOS
-          cp ./tmp-artifacts/ios-lib/liboffline_first_core.dylib ios/Frameworks/
+          if [ -f "./tmp-artifacts/ios-lib/liboffline_first_core.dylib" ]; then
+            cp ./tmp-artifacts/ios-lib/liboffline_first_core.dylib ios/Frameworks/
+          else
+            echo "iOS library not found. Searching alternative paths..."
+            find ./tmp-artifacts -name "*liboffline_first_core*.dylib" -not -path "*arm64.dylib" -not -path "*x86_64.dylib" -exec cp {} ios/Frameworks/liboffline_first_core.dylib \; || echo "No iOS library found"
+          fi
           
-          # Mover archivos macOS
-          cp ./tmp-artifacts/macos-libs/liboffline_first_core_arm64.dylib macos/Frameworks/
-          cp ./tmp-artifacts/macos-libs/liboffline_first_core_x86_64.dylib macos/Frameworks/
+          # Mover archivos macOS - con manejo de errores
+          if [ -f "./tmp-artifacts/macos-libs/liboffline_first_core_arm64.dylib" ]; then
+            cp ./tmp-artifacts/macos-libs/liboffline_first_core_arm64.dylib macos/Frameworks/
+          else
+            echo "macOS arm64 library not found. Searching alternative paths..."
+            find ./tmp-artifacts -name "*liboffline_first_core*arm64*.dylib" -exec cp {} macos/Frameworks/liboffline_first_core_arm64.dylib \; || echo "No macOS arm64 library found"
+          fi
+          
+          if [ -f "./tmp-artifacts/macos-libs/liboffline_first_core_x86_64.dylib" ]; then
+            cp ./tmp-artifacts/macos-libs/liboffline_first_core_x86_64.dylib macos/Frameworks/
+          else
+            echo "macOS x86_64 library not found. Searching alternative paths..."
+            find ./tmp-artifacts -name "*liboffline_first_core*x86_64*.dylib" -exec cp {} macos/Frameworks/liboffline_first_core_x86_64.dylib \; || echo "No macOS x86_64 library found"
+          fi
+          
+          # Verificar archivos copiados
+          echo "Files copied to Android:"
+          find android/src/main/jniLibs -type f | sort
+          
+          echo "Files copied to iOS:"
+          find ios/Frameworks -type f | sort
+          
+          echo "Files copied to macOS:"
+          find macos/Frameworks -type f | sort
 
       - name: Commit and push changes
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          git add android/src/main/jniLibs ios/Frameworks macos/Frameworks
+          
+          # Solo incluir directorios que existen y tienen archivos
+          if [ -n "$(find android/src/main/jniLibs -type f 2>/dev/null)" ]; then
+            git add android/src/main/jniLibs
+          fi
+          
+          if [ -n "$(find ios/Frameworks -type f 2>/dev/null)" ]; then
+            git add ios/Frameworks
+          fi
+          
+          if [ -n "$(find macos/Frameworks -type f 2>/dev/null)" ]; then
+            git add macos/Frameworks
+          fi
+          
           git commit -m "Update native libraries from Rust build [skip ci]" || echo "No changes to commit"
           git push
