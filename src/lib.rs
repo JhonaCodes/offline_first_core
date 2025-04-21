@@ -9,10 +9,31 @@ use crate::local_db_state::AppDbState;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use log::{info, warn};
+
 use crate::app_response::AppResponse;
 
 #[no_mangle]
 pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
+    let name_str = unsafe { CStr::from_ptr(name).to_str().unwrap() };
+
+    // Usar una ruta absoluta o relativa consistente
+    let db_path = format!("./{}", name_str);
+
+    let state = AppDbState::init(db_path);
+    println!("Rust: Database initialized");
+    
+    match state {
+        Ok(response) => {
+            Box::into_raw(Box::new(response))
+        }
+        Err(_) => {
+            std::ptr::null_mut()
+        }
+    }
+}
+
+
+pub extern "C" fn create_db2(name: *const c_char) -> *mut AppDbState {
     // Proteger contra punteros nulos
     if name.is_null() {
         warn!("Rust: NULL pointer passed to create_db");
@@ -43,6 +64,7 @@ pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
         }
     }
 }
+
 
 #[no_mangle]
 pub extern "C" fn push_data(state: *mut AppDbState, json_ptr: *const c_char) -> *const c_char {
