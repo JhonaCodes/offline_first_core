@@ -1,6 +1,7 @@
 pub mod local_db_model;
 pub mod local_db_state;
 mod test;
+mod app_response;
 
 use crate::local_db_model::LocalDbModel;
 use crate::local_db_state::AppDbState;
@@ -8,12 +9,13 @@ use crate::local_db_state::AppDbState;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use log::{info, warn};
+use crate::app_response::AppResponse;
 
 #[no_mangle]
 pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
     // Proteger contra punteros nulos
     if name.is_null() {
-        eprintln!("Rust: NULL pointer passed to create_db");
+        warn!("Rust: NULL pointer passed to create_db");
         return std::ptr::null_mut();
     }
 
@@ -21,7 +23,7 @@ pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
     let name_str = match unsafe { CStr::from_ptr(name).to_str() } {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Rust: Invalid UTF-8 in database name: {}", e);
+            warn!("Rust: Invalid UTF-8 in database name: {}", e);
             return std::ptr::null_mut();
         }
     };
@@ -32,11 +34,11 @@ pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
     // Inicializar la base de datos y manejar el resultado
     match AppDbState::init(db_path) {
         Ok(state) => {
-            println!("Rust: Database initialized successfully");
+            info!("Rust: Database initialized successfully");
             Box::into_raw(Box::new(state))
         }
         Err(err) => {
-            eprintln!("Rust: Failed to initialize database: {}", err);
+            warn!("Rust: Failed to initialize database: {}", err);
             std::ptr::null_mut()
         }
     }
@@ -47,49 +49,42 @@ pub extern "C" fn push_data(state: *mut AppDbState, json_ptr: *const c_char) -> 
     let state = match unsafe { state.as_ref() } {
         Some(s) => s,
         None => {
-            eprintln!("Error: null state pointer");
-            return std::ptr::null();
+            let error = AppResponse::BadRequest("Null state pointer".to_string());
+            return response_to_c_string(&error);
         }
     };
 
-    let json_str = match unsafe { CStr::from_ptr(json_ptr).to_str() } {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error converting C string: {}", e);
-            return std::ptr::null();
-        }
+  
+    let json_str = match c_ptr_to_string(json_ptr, "JSON") {
+        Ok(response) => response,
+        Err(err) => return err
     };
 
-    let model: LocalDbModel = match serde_json::from_str(json_str) {
+    let model: LocalDbModel = match serde_json::from_str(&*json_str) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("Error deserializing JSON: {}", e);
-            eprintln!("Received JSON: {}", json_str);
-            return std::ptr::null();
+            let error = AppResponse::SerializationError(format!("Invalid JSON: {}", e));
+            return response_to_c_string(&error);
         }
     };
+    
 
     match state.push(model) {
         Ok(result_model) => {
             match serde_json::to_string(&result_model) {
                 Ok(json) => {
-                    match CString::new(json) {
-                        Ok(c_str) => c_str.into_raw(),
-                        Err(e) => {
-                            eprintln!("Error creating CString: {}", e);
-                            std::ptr::null()
-                        }
-                    }
+                    let success = AppResponse::Ok(json);
+                    response_to_c_string(&success)
                 },
                 Err(e) => {
-                    eprintln!("Error serializing result: {}", e);
-                    std::ptr::null()
+                    let error = AppResponse::SerializationError(format!("Failed to serialize result: {}", e));
+                    response_to_c_string(&error)
                 }
             }
         },
         Err(e) => {
-            eprintln!("Error pushing data: {:?}", e);
-            std::ptr::null()
+            // Aquí 'e' ya es un AppResponse
+            response_to_c_string(&e)
         }
     }
 }
@@ -99,52 +94,46 @@ pub extern "C" fn push_data(state: *mut AppDbState, json_ptr: *const c_char) -> 
 pub extern "C" fn get_by_id(state: *mut AppDbState, id: *const c_char) -> *const c_char {
     // Verificar si state o id son nulos
     if state.is_null() {
-        warn!("Rust: Null state pointer passed to get_by_id");
-        return std::ptr::null();
+        let error = AppResponse::BadRequest("Null state pointer passed to get_by_id".to_string());
+        return response_to_c_string(&error);
     }
 
     if id.is_null() {
-        warn!("Rust: Null id pointer passed to get_by_id");
-        return std::ptr::null();
+        let error = AppResponse::BadRequest("Null id pointer passed to get_by_id".to_string());
+        return response_to_c_string(&error);
     }
 
     // Ahora es seguro desreferenciar
     let state = unsafe { &*state };
 
     // Convertir id a String con manejo de errores
-    let id_str = match unsafe { CStr::from_ptr(id).to_str() } {
-        Ok(s) => s,
-        Err(e) => {
-            warn!("Rust: Invalid UTF-8 in id: {:?}", e);
-            return std::ptr::null();
-        }
+
+    let id_str = match c_ptr_to_string(id, "id") {
+        Ok(json) => json,
+        Err(error_ptr) => return error_ptr,
     };
 
-    match state.get_by_id(id_str) {
+    match state.get_by_id(&*id_str) {
         Ok(Some(model)) => {
             match serde_json::to_string(&model) {
                 Ok(json) => {
-                    match CString::new(json) {
-                        Ok(c_string) => c_string.into_raw(),
-                        Err(e) => {
-                            warn!("Rust: Error creating CString: {:?}", e);
-                            std::ptr::null()
-                        }
-                    }
+                    let success = AppResponse::Ok(json);
+                    response_to_c_string(&success)
                 },
                 Err(e) => {
-                    println!("Rust: Error serializing to JSON: {:?}", e);
-                    std::ptr::null()
+                    let error = AppResponse::SerializationError(format!("Error serializing to JSON: {:?}", e));
+                    response_to_c_string(&error)
                 }
             }
         },
         Ok(None) => {
-            println!("Rust: No model found with id: {}", id_str);
-            std::ptr::null()
+            let error = AppResponse::NotFound(format!("No model found with id: {}", id_str));
+            response_to_c_string(&error)
         },
         Err(e) => {
-            println!("Rust: Error in get_by_id: {:?}", e);
-            std::ptr::null()
+            // Asumiendo que e ya es o puede convertirse a AppResponse
+            let error = AppResponse::DatabaseError(format!("Error in get_by_id: {:?}", e));
+            response_to_c_string(&error)
         }
     }
 }
@@ -153,122 +142,231 @@ pub extern "C" fn get_by_id(state: *mut AppDbState, id: *const c_char) -> *const
 pub extern "C" fn get_all(state: *mut AppDbState) -> *const c_char {
     // Verificar si el puntero es nulo
     if state.is_null() {
-        println!("Rust: Null state pointer passed to get_all");
-        return std::ptr::null();
+        let error = AppResponse::BadRequest("Null state pointer passed to get_all".to_string());
+        return response_to_c_string(&error);
     }
 
     // Ahora es seguro desreferenciar
     let state = unsafe { &*state };
+
     match state.get() {
         Ok(models) => {
-            let json = serde_json::to_string(&models).unwrap();
-            CString::new(json).unwrap().into_raw()
+            match serde_json::to_string(&models) {
+                Ok(json) => {
+                    let success = AppResponse::Ok(json);
+                    response_to_c_string(&success)
+                },
+                Err(e) => {
+                    let error = AppResponse::SerializationError(format!("Error serializing models: {:?}", e));
+                    response_to_c_string(&error)
+                }
+            }
         },
         Err(e) => {
-            println!("Rust: Error in get_all: {:?}", e);
+            let error = AppResponse::DatabaseError(format!("Error in get_all: {:?}", e));
+            response_to_c_string(&error)
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn update_data(state: *mut AppDbState, json_ptr: *const c_char) -> *const c_char {
+    // Verificar si los punteros son nulos
+    if state.is_null() {
+        let error = AppResponse::BadRequest("Null state pointer passed to update_data".to_string());
+        return response_to_c_string(&error);
+    }
+
+    if json_ptr.is_null() {
+        let error = AppResponse::BadRequest("Null JSON pointer passed to update_data".to_string());
+        return response_to_c_string(&error);
+    }
+
+    // Convertir el puntero C a string de Rust con manejo de errores
+    let json_str = match c_ptr_to_string(json_ptr, "JSON") {
+        Ok(json) => json,
+        Err(error_ptr) => return error_ptr,
+    };
+
+    // Deserializar el JSON a modelo con manejo de errores
+    let model: LocalDbModel = match serde_json::from_str(&*json_str) {
+        Ok(m) => m,
+        Err(e) => {
+            let error = AppResponse::SerializationError(format!("Error deserializing JSON: {:?}", e));
+            return response_to_c_string(&error);
+        }
+    };
+
+
+    // Mantener el resto exactamente igual
+    let state = unsafe { &*state };
+
+    match state.update(model) {
+        Ok(Some(updated_model)) => {
+            // Serializar el modelo actualizado
+            match serde_json::to_string(&updated_model) {
+                Ok(json) => {
+                    let success = AppResponse::Ok(json);
+                    response_to_c_string(&success)
+                },
+                Err(e) => {
+                    let error = AppResponse::SerializationError(format!("Error serializing updated model: {:?}", e));
+                    response_to_c_string(&error)
+                }
+            }
+        },
+        Ok(None) => {
+            let error = AppResponse::NotFound("Model not found for update".to_string());
+            response_to_c_string(&error)
+        },
+        Err(e) => {
+            let error = AppResponse::DatabaseError(format!("Error updating model: {:?}", e));
+            response_to_c_string(&error)
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn delete_by_id(db_state: *mut AppDbState, id: *const c_char) -> *const c_char {
+    // Verificar que los punteros no sean nulos
+    if db_state.is_null() {
+        let error = AppResponse::BadRequest("Null state pointer passed to delete_by_id".to_string());
+        return response_to_c_string(&error);
+    }
+
+    if id.is_null() {
+        let error = AppResponse::BadRequest("Null id pointer passed to delete_by_id".to_string());
+        return response_to_c_string(&error);
+    }
+
+    // Convertir el puntero de ID a un string de Rust
+    let id_str = match c_ptr_to_string(id, "id") {
+        Ok(id) => id,
+        Err(error_ptr) => return error_ptr,
+    };
+
+    // Acceder al estado de la base de datos
+    let db_state = unsafe { &mut *db_state };
+
+    // Usar tu implementación existente de delete con manejo adecuado de errores
+    match db_state.delete_by_id(&*id_str) {
+        Ok(true) => {
+            let success = AppResponse::Ok("Record deleted successfully".to_string());
+            response_to_c_string(&success)
+        },
+        Ok(false) => {
+            let not_found = AppResponse::NotFound(format!("No record found with id: {}", id_str));
+            response_to_c_string(&not_found)
+        },
+        Err(e) => {
+            let error = AppResponse::DatabaseError(format!("Error deleting record: {:?}", e));
+            response_to_c_string(&error)
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn clear_all_records(db_state: *mut AppDbState) -> *const c_char {
+    // Verificar que el puntero no sea nulo
+    if db_state.is_null() {
+        let error = AppResponse::BadRequest("Null state pointer passed to clear_all_records".to_string());
+        return response_to_c_string(&error);
+    }
+
+    // Acceder al estado de la base de datos de manera segura
+    let db_state = unsafe { &*db_state };
+
+    // Llamar a la implementación de clear_all_records
+    match db_state.clear_all_records() {
+        Ok(_) => {
+            let success = AppResponse::Ok("All records cleared successfully".to_string());
+            response_to_c_string(&success)
+        },
+        Err(e) => {
+            let error = AppResponse::DatabaseError(format!("Error clearing records: {:?}", e));
+            response_to_c_string(&error)
+        }
+    }
+}
+#[no_mangle]
+pub extern "C" fn reset_database(db_state: *mut AppDbState, name_ptr: *const c_char) -> *const c_char {
+    // Verificar que los punteros no sean nulos
+    if db_state.is_null() {
+        let error = AppResponse::BadRequest("Null state pointer passed to reset_database".to_string());
+        return response_to_c_string(&error);
+    }
+
+    if name_ptr.is_null() {
+        let error = AppResponse::BadRequest("Null name pointer passed to reset_database".to_string());
+        return response_to_c_string(&error);
+    }
+
+    // Convertir el puntero de nombre a un string de Rust
+    let name = match c_ptr_to_string(name_ptr, "name") {
+        Ok(name) => name,
+        Err(error_ptr) => return error_ptr,
+    };
+
+
+    // Acceder al estado de la base de datos
+    let db_state = unsafe { &mut *db_state };
+
+    // Llamar a la implementación de reset_database
+    match db_state.reset_database(&name) {
+        Ok(_) => {
+            let success = AppResponse::Ok(format!("Database '{}' was reset successfully", name));
+            response_to_c_string(&success)
+        },
+        Err(e) => {
+            let error = AppResponse::DatabaseError(format!("Error resetting database: {:?}", e));
+            response_to_c_string(&error)
+        }
+    }
+}
+
+
+// Función auxiliar para convertir AppResponse a C string
+fn response_to_c_string(response: &AppResponse) -> *const c_char {
+    let json = match serde_json::to_string(response) {
+        Ok(j) => j,
+        Err(e) => {
+            warn!("Error serializing response: {}", e);
+            return std::ptr::null();
+        }
+    };
+
+    match CString::new(json) {
+        Ok(c_str) => c_str.into_raw(),
+        Err(e) => {
+            warn!("Error creating CString: {}", e);
             std::ptr::null()
         }
     }
 }
 
 
-#[no_mangle]
-pub extern "C" fn update_data(state: *mut AppDbState, json_ptr: *const c_char) -> *const c_char {
-    // Verificar si los punteros son nulos
-    if state.is_null() || json_ptr.is_null() {
-        return std::ptr::null();
+/// Convierte un puntero C a una cadena Rust, manejando todos los posibles errores
+///
+/// Parámetros:
+/// - `ptr`: puntero C a la cadena
+/// - `field_name`: nombre del campo para mensajes de error más descriptivos
+///
+/// Retorna:
+/// - `Ok(String)`: si la conversión fue exitosa
+/// - `Err(*const c_char)`: puntero a un mensaje de error en formato C si falló
+fn c_ptr_to_string(ptr: *const c_char, field_name: &str) -> Result<String, *const c_char> {
+    // Verificar si el puntero es nulo
+    if ptr.is_null() {
+        let error = AppResponse::BadRequest(format!("Null {} pointer", field_name));
+        return Err(response_to_c_string(&error));
     }
 
-    // Mantener el resto exactamente igual
-    let state = unsafe { &*state };
-    let json_str = unsafe { CStr::from_ptr(json_ptr).to_str().unwrap() };
-    let model: LocalDbModel = serde_json::from_str(json_str).unwrap();
-
-    match state.update(model) {
-        Ok(Some(updated_model)) => {
-            CString::new(serde_json::to_string(&updated_model).unwrap()).unwrap().into_raw()
-        },
-        _ => std::ptr::null()
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn delete_by_id(db_state: *mut AppDbState, id: *const c_char) -> bool {
-    // Verificar que los punteros no sean nulos
-    if db_state.is_null() || id.is_null() {
-        return false;
-    }
-
-    // Convertir el puntero de ID a un string de Rust
-    let id_str = unsafe {
-        CStr::from_ptr(id)
-            .to_str()
-            .unwrap_or("No se pudo pasar a String")
-    };
-
-    // Acceder al estado de la base de datos
-    let db_state = unsafe { &mut *db_state };
-
-    // Usar tu implementación existente de delete
-    db_state.delete_by_id(id_str).unwrap_or_else(|_| false)
-}
-
-#[no_mangle]
-pub extern "C" fn clear_all_records(db_state: &AppDbState) -> *const c_char {
-    match db_state.clear_all_records() {
-        Ok(response) => {
-            let response_str = response.to_string();
-            CString::new(response_str).unwrap().into_raw()
-        }
+    // Convertir a str de Rust
+    match unsafe { CStr::from_ptr(ptr).to_str() } {
+        Ok(s) => Ok(s.to_string()),
         Err(e) => {
-            println!("Rust: Error in clear all records: {:?}", e);
-            CString::new("Error clearing data").unwrap().into_raw()
+            let error = AppResponse::BadRequest(format!("Invalid UTF-8 in {}: ", e));
+            Err(response_to_c_string(&error))
         }
-    }
-}
-
-
-
-#[no_mangle]
-pub extern "C" fn reset_database(db_state: &mut AppDbState, name: &String) -> *const c_char{
-    match db_state.reset_database(name) {
-        Ok(_) => {
-            CString::new("Database was removed").unwrap().into_raw()
-        },
-        Err(e) => {
-            println!("Rust: Error in reset database: {:?}", e); // Debug
-            CString::new("Error clearing data").unwrap().into_raw()
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn close_database(db_ptr: *mut AppDbState) -> *mut bool {
-    if !db_ptr.is_null() {
-        unsafe {
-            let _ = Box::from_raw(db_ptr);
-            // Crear un nuevo booleano en el heap para devolver
-            let success = Box::new(true);
-            Box::into_raw(success)
-        }
-    } else {
-        let failure = Box::new(false);
-        Box::into_raw(failure)
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn is_database_open(db_ptr: *const AppDbState) -> *mut bool {
-    if !db_ptr.is_null() {
-        unsafe {
-            let db_state = &*db_ptr;
-            
-            // Devolver el resultado como un puntero
-            let result = Box::new(db_state.is_open());
-            Box::into_raw(result)
-        }
-    } else {
-        let result = Box::new(false);
-        Box::into_raw(result)
     }
 }

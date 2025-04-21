@@ -1,8 +1,12 @@
-use redb::{Database, DatabaseError, ReadableTable, ReadableTableMetadata, StorageError, TableDefinition};
 use crate::local_db_model::LocalDbModel;
-use std::path::Path;
-use std::fs;
 use log::{info, warn};
+use redb::{
+    Database, DatabaseError, Error, ReadableTable, ReadableTableMetadata, StorageError,
+    TableDefinition,
+};
+use std::fs;
+use std::path::Path;
+use crate::app_response::AppResponse;
 
 // Table definition for redb - required for key-value storage
 const MAIN_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("main");
@@ -10,7 +14,6 @@ const MAIN_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("main");
 pub struct AppDbState {
     db: Database,
     path: String, // Store the path for potential database reset
-    is_open: bool
 }
 
 impl AppDbState {
@@ -40,7 +43,9 @@ impl AppDbState {
                         // Error creating the DB: could be due to permissions, insufficient space,
                         // or because the DB already exists and is opened by another process
                         warn!("Error on creating database: {}", err);
-                        return Err(DatabaseError::Storage(StorageError::Corrupted(String::from("Error when trying to create database"))));
+                        return Err(DatabaseError::Storage(StorageError::Corrupted(
+                            String::from("Error when trying to create database"),
+                        )));
                     }
                 }
             }
@@ -53,7 +58,9 @@ impl AppDbState {
             Ok(txn) => txn,
             Err(err) => {
                 warn!("Error beginning write transaction: {}", err);
-                return Err(DatabaseError::Storage(StorageError::Corrupted(String::from("Error beginning write transaction"))));
+                return Err(DatabaseError::Storage(StorageError::Corrupted(
+                    String::from("Error beginning write transaction"),
+                )));
             }
         };
 
@@ -63,10 +70,12 @@ impl AppDbState {
         match write_txn.open_table(MAIN_TABLE) {
             Ok(_) => {
                 info!("Table opened successfully")
-            },
+            }
             Err(err) => {
                 warn!("Error opening table: {}", err);
-                return Err(DatabaseError::Storage(StorageError::Corrupted(String::from("Error opening table"))));
+                return Err(DatabaseError::Storage(StorageError::Corrupted(
+                    String::from("Error opening table"),
+                )));
             }
         }
 
@@ -75,35 +84,34 @@ impl AppDbState {
         match write_txn.commit() {
             Ok(_) => {
                 info!("Transaction committed successfully")
-            },
+            }
             Err(err) => {
                 warn!("Error committing transaction: {}", err);
-                return Err(DatabaseError::Storage(StorageError::Corrupted(String::from("Error committing transaction"))));
+                return Err(DatabaseError::Storage(StorageError::Corrupted(
+                    String::from("Error committing transaction"),
+                )));
             }
         }
 
         // Return the AppDbState instance
         // At this point, the DB is open and ready for operations
-        Ok(Self {
-            db,
-            path: name,
-            is_open: true
-        })
+        Ok(Self { db, path: name })
     }
 
-    pub fn push(&self, model: LocalDbModel) -> Result<LocalDbModel, redb::Error> {
-        let json = serde_json::to_string(&model).unwrap();
-        let write_txn = self.db.begin_write()?;
+    pub fn push(&self, model: LocalDbModel) -> Result<LocalDbModel, AppResponse> {
+        let json = serde_json::to_string(&model)?;
+
+        let write_txn = self.db.begin_write().map_err(AppResponse::from)?;
         {
-            let mut table = write_txn.open_table(MAIN_TABLE)?;
-            table.insert(model.id.as_str(), json.as_bytes())?;
+            let mut table = write_txn.open_table(MAIN_TABLE).map_err(AppResponse::from)?;
+            table.insert(model.id.as_str(), json.as_bytes()).map_err(AppResponse::from)?;
         }
-        write_txn.commit()?;
+        write_txn.commit().map_err(AppResponse::from)?;
+
         Ok(model)
     }
 
-    pub fn get_by_id(&self, id: &str) -> Result<Option<LocalDbModel>, redb::Error> {
-
+    pub fn get_by_id(&self, id: &str) -> Result<Option<LocalDbModel>, Error> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(MAIN_TABLE)?;
 
@@ -112,9 +120,9 @@ impl AppDbState {
                 let json_str = String::from_utf8(bytes.value().to_vec()).unwrap();
                 let model = serde_json::from_str(&json_str).unwrap();
                 Ok(Some(model))
-            },
+            }
             None => {
-                println!("No value found for id {}", id);
+                info!("No value found for id {}", id);
                 Ok(None)
             }
         }
@@ -132,11 +140,11 @@ impl AppDbState {
                     let json_str = String::from_utf8(Vec::from(value.value())).unwrap();
                     let model: LocalDbModel = serde_json::from_str(&json_str).unwrap();
                     models.push(model);
-                },
-                Err(e) => println!("Rust: Error reading item: {:?}", e)
+                }
+                Err(e) => info!("Rust: Error reading item: {:?}", e),
             }
         }
-        
+
         Ok(models)
     }
 
@@ -144,7 +152,7 @@ impl AppDbState {
         let write_txn = self.db.begin_write()?;
         let mut table = write_txn.open_table(MAIN_TABLE)?;
         let existed = table.remove(id)?.is_some();
-        drop(table);  // Explícitamente liberamos la tabla
+        drop(table); // Explícitamente liberamos la tabla
         write_txn.commit()?;
         Ok(existed)
     }
@@ -184,22 +192,22 @@ impl AppDbState {
             let keys: Vec<String> = table
                 .iter()?
                 .filter_map(|entry| entry.ok())
-                .map(|(k, _)| k.value().to_string()) 
+                .map(|(k, _)| k.value().to_string())
                 .collect();
 
             for key in keys {
                 if let Err(e) = table.remove(key.as_str()) {
-                    eprintln!("Error on deleting key: {:?}", e);
+                    warn!("Error on deleting key: {:?}", e);
                 } else {
                     count += 1;
                 }
             }
         }
 
-        write_txn.commit()?; 
+        write_txn.commit()?;
         Ok(count)
     }
-    
+
     /// Completely resets the database by:
     /// 1. Closing the current connection
     /// 2. Deleting the database file
@@ -223,13 +231,7 @@ impl AppDbState {
 
         // Update our database reference
         self.db = new_db;
-        
+
         Ok(true)
     }
-
-
-    pub fn is_open(&self) -> bool {
-        self.is_open
-    }
-    
 }

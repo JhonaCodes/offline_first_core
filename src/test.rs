@@ -4,7 +4,7 @@ pub mod tests {
     use crate::local_db_model::LocalDbModel;
     use crate::local_db_state::AppDbState;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use log::{warn};
+    use log::{info, warn};
     use redb::DatabaseError;
 
     // Función helper para crear modelos de prueba
@@ -29,7 +29,7 @@ pub mod tests {
                         let entry = match entry_result {
                             Ok(e) => e,
                             Err(e) => {
-                                println!("Error al leer entrada del directorio: {}", e);
+                                info!("Error al leer entrada del directorio: {}", e);
                                 continue;
                             }
                         };
@@ -38,7 +38,7 @@ pub mod tests {
                         let file_name = match entry.file_name().into_string() {
                             Ok(name) => name,
                             Err(_) => {
-                                println!("Error: nombre de archivo contiene caracteres inválidos");
+                                warn!("Error: nombre de archivo contiene caracteres inválidos");
                                 continue;
                             }
                         };
@@ -50,13 +50,13 @@ pub mod tests {
 
                         // Intentar eliminar el archivo
                         match std::fs::remove_file(entry.path()) {
-                            Ok(_) => println!("Base de datos eliminada: {}", file_name),
-                            Err(e) => println!("Error eliminando {}: {}", file_name, e),
+                            Ok(_) => info!("Base de datos eliminada: {}", file_name),
+                            Err(e) => warn!("Error eliminando {}: {}", file_name, e),
                         }
                     }
                 },
                 Err(e) => {
-                    println!("Error al leer el directorio: {}", e);
+                    warn!("Error al leer el directorio: {}", e);
                 }
             }
         }
@@ -111,55 +111,55 @@ pub mod tests {
         assert!(first_instance.is_ok(), "First instance should be created successfully");
         let first_db = first_instance.unwrap();
 
-        println!("First instance opened successfully");
+        info!("First instance opened successfully");
 
         // Second instance - attempt to open the same database while first is still open
         let second_instance = AppDbState::init(db_name.to_string());
 
         // Check if we were able to open a second instance
         if second_instance.is_ok() {
-            println!("Second instance opened successfully - database supports multiple connections");
+            info!("Second instance opened successfully - database supports multiple connections");
 
             // Test writing to the first instance
             let model_1 = create_test_model("test1", None);
             let result_1 = first_db.push(model_1.clone());
-            println!("Write to first instance: {}", result_1.is_ok());
+            info!("Write to first instance: {}", result_1.is_ok());
 
             // Test writing to the second instance
             let second_db = second_instance.as_ref().unwrap();
             let model_2 = create_test_model("test2", None);
             let result_2 = second_db.push(model_2.clone());
-            println!("Write to second instance: {}", result_2.is_ok());
+            info!("Write to second instance: {}", result_2.is_ok());
 
             // Test cross-instance data visibility (if each instance can read data written by the other)
             if result_1.is_ok() && result_2.is_ok() {
                 // Try to read from first instance what was written by second
                 let read_1 = first_db.get_by_id("test2");
-                println!("First instance can read data from second: {}",
+                info!("First instance can read data from second: {}",
                          read_1.is_ok() && read_1.unwrap().is_some());
 
                 // Try to read from second instance what was written by first
                 let read_2 = second_db.get_by_id("test1");
-                println!("Second instance can read data from first: {}",
+                info!("Second instance can read data from first: {}",
                          read_2.is_ok() && read_2.unwrap().is_some());
             }
         } else {
-            println!("Second instance failed to open the same database");
+            info!("Second instance failed to open the same database");
 
             // Analyze the specific error type
             match second_instance.err().unwrap() {
                 DatabaseError::Storage(storage_err) => {
-                    println!("Storage error: {:?}", storage_err);
+                    info!("Storage error: {:?}", storage_err);
                 },
                 _ => {
-                    println!("Other type of error");
+                    info!("Other type of error");
                 }
             }
 
             // Verify that the first instance still works
             let model = create_test_model("test1", None);
             let result = first_db.push(model);
-            println!("First instance still functioning: {}", result.is_ok());
+            info!("First instance still functioning: {}", result.is_ok());
         }
 
         // Clean up: Remove the test database
