@@ -8,9 +8,16 @@ use crate::local_db_state::AppDbState;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
-use log::{warn};
+use log::{warn, info};
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use crate::app_response::AppResponse;
+
+// Global registry para tracking de AppDbState instances
+lazy_static::lazy_static! {
+    static ref DB_INSTANCES: Mutex<HashMap<usize, bool>> = Mutex::new(HashMap::new());
+}
 
 #[no_mangle]
 pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
@@ -20,13 +27,24 @@ pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
     let db_path = format!("./{}", name_str);
 
     let state = AppDbState::init(db_path);
-    println!("Rust: Database initialized");
+    info!("Rust: Database initialized");
     
     match state {
         Ok(response) => {
-            Box::into_raw(Box::new(response))
+            let boxed = Box::new(response);
+            let ptr = Box::into_raw(boxed);
+            
+            // Register the instance for tracking
+            let addr = ptr as usize;
+            if let Ok(mut instances) = DB_INSTANCES.lock() {
+                instances.insert(addr, true);
+                info!("Registered DB instance: {}", addr);
+            }
+            
+            ptr
         }
-        Err(_) => {
+        Err(e) => {
+            warn!("Failed to create database: {:?}", e);
             std::ptr::null_mut()
         }
     }
@@ -310,6 +328,74 @@ pub extern "C" fn reset_database(db_state: *mut AppDbState, name_ptr: *const c_c
             let error = AppResponse::DatabaseError(format!("Error resetting database: {:?}", e));
             response_to_c_string(&error)
         }
+    }
+}
+
+/// Properly closes a database connection and frees all associated resources
+/// This function should be called before hot restart or app termination
+#[no_mangle]
+pub extern "C" fn close_database(db_state: *mut AppDbState) -> *const c_char {
+    if db_state.is_null() {
+        let error = AppResponse::BadRequest("Null state pointer passed to close_database".to_string());
+        return response_to_c_string(&error);
+    }
+
+    let addr = db_state as usize;
+    
+    // Check if the instance is registered and valid
+    let is_valid = if let Ok(instances) = DB_INSTANCES.lock() {
+        instances.contains_key(&addr)
+    } else {
+        false
+    };
+
+    if !is_valid {
+        let error = AppResponse::BadRequest("Invalid or already closed database instance".to_string());
+        return response_to_c_string(&error);
+    }
+
+    // Safely drop the database instance
+    unsafe {
+        let _db_box = Box::from_raw(db_state);
+        // _db_box will be automatically dropped here, calling AppDbState's Drop implementation
+    }
+
+    // Remove from registry
+    if let Ok(mut instances) = DB_INSTANCES.lock() {
+        instances.remove(&addr);
+        info!("Unregistered DB instance: {}", addr);
+    }
+
+    let success = AppResponse::Ok("Database closed successfully".to_string());
+    response_to_c_string(&success)
+}
+
+/// Frees memory allocated for C string responses
+/// Should be called after consuming the response from any FFI function
+#[no_mangle]
+pub extern "C" fn free_c_string(ptr: *mut c_char) {
+    if ptr.is_null() {
+        return;
+    }
+    
+    unsafe {
+        let _ = CString::from_raw(ptr);
+        // CString will be automatically dropped here, freeing the memory
+    }
+}
+
+/// Validates that a database pointer is still valid and registered
+#[no_mangle]
+pub extern "C" fn is_database_valid(db_state: *mut AppDbState) -> bool {
+    if db_state.is_null() {
+        return false;
+    }
+
+    let addr = db_state as usize;
+    if let Ok(instances) = DB_INSTANCES.lock() {
+        instances.contains_key(&addr)
+    } else {
+        false
     }
 }
 
