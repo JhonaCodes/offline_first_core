@@ -29,7 +29,6 @@ lazy_static::lazy_static! {
     static ref DB_INSTANCES: Mutex<HashMap<usize, InstanceInfo>> = Mutex::new(HashMap::new());
     static ref GENERATION_COUNTER: AtomicU64 = AtomicU64::new(1);
 }
-
 #[no_mangle]
 pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
     let name_str = unsafe { CStr::from_ptr(name).to_str().unwrap() };
