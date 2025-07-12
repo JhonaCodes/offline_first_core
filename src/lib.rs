@@ -10,13 +10,24 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use log::{warn, info};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, atomic::{AtomicU64, Ordering}};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::app_response::AppResponse;
 
-// Global registry para tracking de AppDbState instances
+// Global registry para tracking de AppDbState instances con generaciones
+// para manejar hot reload scenarios
+#[derive(Clone, Debug)]
+struct InstanceInfo {
+    generation: u64,
+    created_at: u64,
+    last_used: u64,
+    is_valid: bool,
+}
+
 lazy_static::lazy_static! {
-    static ref DB_INSTANCES: Mutex<HashMap<usize, bool>> = Mutex::new(HashMap::new());
+    static ref DB_INSTANCES: Mutex<HashMap<usize, InstanceInfo>> = Mutex::new(HashMap::new());
+    static ref GENERATION_COUNTER: AtomicU64 = AtomicU64::new(1);
 }
 
 #[no_mangle]
@@ -34,11 +45,19 @@ pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
             let boxed = Box::new(response);
             let ptr = Box::into_raw(boxed);
             
-            // Register the instance for tracking
+            // Register the instance with generation tracking
             let addr = ptr as usize;
+            let generation = GENERATION_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            
             if let Ok(mut instances) = DB_INSTANCES.lock() {
-                instances.insert(addr, true);
-                info!("Registered DB instance: {}", addr);
+                instances.insert(addr, InstanceInfo {
+                    generation,
+                    created_at: now,
+                    last_used: now,
+                    is_valid: true,
+                });
+                info!("Registered DB instance: {} with generation: {}", addr, generation);
             }
             
             ptr
@@ -53,6 +72,12 @@ pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
 
 #[no_mangle]
 pub extern "C" fn push_data(state: *mut AppDbState, json_ptr: *const c_char) -> *const c_char {
+    // Validate instance before proceeding
+    if !validate_and_update_instance(state) {
+        let error = AppResponse::BadRequest("Invalid or stale database instance".to_string());
+        return response_to_c_string(&error);
+    }
+
     let state = match unsafe { state.as_ref() } {
         Some(s) => s,
         None => {
@@ -99,6 +124,12 @@ pub extern "C" fn push_data(state: *mut AppDbState, json_ptr: *const c_char) -> 
 
 #[no_mangle]
 pub extern "C" fn get_by_id(state: *mut AppDbState, id: *const c_char) -> *const c_char {
+    // Validate instance before proceeding
+    if !validate_and_update_instance(state) {
+        let error = AppResponse::BadRequest("Invalid or stale database instance".to_string());
+        return response_to_c_string(&error);
+    }
+
     // Verificar si state o id son nulos
     if state.is_null() {
         let error = AppResponse::BadRequest("Null state pointer passed to get_by_id".to_string());
@@ -147,6 +178,12 @@ pub extern "C" fn get_by_id(state: *mut AppDbState, id: *const c_char) -> *const
 
 #[no_mangle]
 pub extern "C" fn get_all(state: *mut AppDbState) -> *const c_char {
+    // Validate instance before proceeding
+    if !validate_and_update_instance(state) {
+        let error = AppResponse::BadRequest("Invalid or stale database instance".to_string());
+        return response_to_c_string(&error);
+    }
+
     // Verificar si el puntero es nulo
     if state.is_null() {
         let error = AppResponse::BadRequest("Null state pointer passed to get_all".to_string());
@@ -178,6 +215,12 @@ pub extern "C" fn get_all(state: *mut AppDbState) -> *const c_char {
 
 #[no_mangle]
 pub extern "C" fn update_data(state: *mut AppDbState, json_ptr: *const c_char) -> *const c_char {
+    // Validate instance before proceeding
+    if !validate_and_update_instance(state) {
+        let error = AppResponse::BadRequest("Invalid or stale database instance".to_string());
+        return response_to_c_string(&error);
+    }
+
     // Verificar si los punteros son nulos
     if state.is_null() {
         let error = AppResponse::BadRequest("Null state pointer passed to update_data".to_string());
@@ -235,6 +278,12 @@ pub extern "C" fn update_data(state: *mut AppDbState, json_ptr: *const c_char) -
 
 #[no_mangle]
 pub extern "C" fn delete_by_id(db_state: *mut AppDbState, id: *const c_char) -> *const c_char {
+    // Validate instance before proceeding
+    if !validate_and_update_instance(db_state) {
+        let error = AppResponse::BadRequest("Invalid or stale database instance".to_string());
+        return response_to_c_string(&error);
+    }
+
     // Verificar que los punteros no sean nulos
     if db_state.is_null() {
         let error = AppResponse::BadRequest("Null state pointer passed to delete_by_id".to_string());
@@ -274,6 +323,12 @@ pub extern "C" fn delete_by_id(db_state: *mut AppDbState, id: *const c_char) -> 
 
 #[no_mangle]
 pub extern "C" fn clear_all_records(db_state: *mut AppDbState) -> *const c_char {
+    // Validate instance before proceeding
+    if !validate_and_update_instance(db_state) {
+        let error = AppResponse::BadRequest("Invalid or stale database instance".to_string());
+        return response_to_c_string(&error);
+    }
+
     // Verificar que el puntero no sea nulo
     if db_state.is_null() {
         let error = AppResponse::BadRequest("Null state pointer passed to clear_all_records".to_string());
@@ -297,6 +352,12 @@ pub extern "C" fn clear_all_records(db_state: *mut AppDbState) -> *const c_char 
 }
 #[no_mangle]
 pub extern "C" fn reset_database(db_state: *mut AppDbState, name_ptr: *const c_char) -> *const c_char {
+    // Validate instance before proceeding
+    if !validate_and_update_instance(db_state) {
+        let error = AppResponse::BadRequest("Invalid or stale database instance".to_string());
+        return response_to_c_string(&error);
+    }
+
     // Verificar que los punteros no sean nulos
     if db_state.is_null() {
         let error = AppResponse::BadRequest("Null state pointer passed to reset_database".to_string());
@@ -344,7 +405,11 @@ pub extern "C" fn close_database(db_state: *mut AppDbState) -> *const c_char {
     
     // Check if the instance is registered and valid
     let is_valid = if let Ok(instances) = DB_INSTANCES.lock() {
-        instances.contains_key(&addr)
+        if let Some(info) = instances.get(&addr) {
+            info.is_valid
+        } else {
+            false
+        }
     } else {
         false
     };
@@ -385,6 +450,7 @@ pub extern "C" fn free_c_string(ptr: *mut c_char) {
 }
 
 /// Validates that a database pointer is still valid and registered
+/// Also updates last_used timestamp for the instance
 #[no_mangle]
 pub extern "C" fn is_database_valid(db_state: *mut AppDbState) -> bool {
     if db_state.is_null() {
@@ -392,13 +458,164 @@ pub extern "C" fn is_database_valid(db_state: *mut AppDbState) -> bool {
     }
 
     let addr = db_state as usize;
-    if let Ok(instances) = DB_INSTANCES.lock() {
-        instances.contains_key(&addr)
+    if let Ok(mut instances) = DB_INSTANCES.lock() {
+        if let Some(info) = instances.get_mut(&addr) {
+            if info.is_valid {
+                // Update last_used timestamp
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                info.last_used = now;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
     } else {
         false
     }
 }
 
+/// Validates that a database instance is from the expected generation
+/// This helps detect hot reload scenarios where instances become stale
+#[no_mangle]
+pub extern "C" fn validate_instance_generation(
+    db_state: *mut AppDbState, 
+    expected_generation: u64
+) -> bool {
+    if db_state.is_null() {
+        return false;
+    }
+
+    let addr = db_state as usize;
+    if let Ok(instances) = DB_INSTANCES.lock() {
+        if let Some(info) = instances.get(&addr) {
+            info.is_valid && info.generation == expected_generation
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+/// Ping function for heartbeat monitoring
+/// Returns the current generation and status of the instance
+#[no_mangle]
+pub extern "C" fn ping_database(db_state: *mut AppDbState) -> *const c_char {
+    if db_state.is_null() {
+        let error = AppResponse::BadRequest("Null state pointer passed to ping_database".to_string());
+        return response_to_c_string(&error);
+    }
+
+    let addr = db_state as usize;
+    if let Ok(mut instances) = DB_INSTANCES.lock() {
+        if let Some(info) = instances.get_mut(&addr) {
+            if info.is_valid {
+                // Update last_used timestamp
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                info.last_used = now;
+                
+                let ping_response = format!(
+                    "{{\"generation\": {}, \"created_at\": {}, \"last_used\": {}, \"is_valid\": true}}", 
+                    info.generation, info.created_at, info.last_used
+                );
+                let success = AppResponse::Ok(ping_response);
+                response_to_c_string(&success)
+            } else {
+                let error = AppResponse::BadRequest("Instance is marked as invalid".to_string());
+                response_to_c_string(&error)
+            }
+        } else {
+            let error = AppResponse::NotFound("Instance not found in registry".to_string());
+            response_to_c_string(&error)
+        }
+    } else {
+        let error = AppResponse::DatabaseError("Failed to access instance registry".to_string());
+        response_to_c_string(&error)
+    }
+}
+
+/// Cleanup function to remove stale instances
+/// Should be called periodically to clean up old instances
+#[no_mangle]
+pub extern "C" fn cleanup_stale_instances() -> *const c_char {
+    let cleanup_threshold = 300; // 5 minutes in seconds
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    
+    if let Ok(mut instances) = DB_INSTANCES.lock() {
+        let initial_count = instances.len();
+        instances.retain(|_addr, info| {
+            // Keep instance if it's valid and recently used, or still young
+            info.is_valid && (now - info.last_used < cleanup_threshold || now - info.created_at < 60)
+        });
+        let final_count = instances.len();
+        let cleaned = initial_count - final_count;
+        
+        info!("Cleaned up {} stale instances. {} instances remain.", cleaned, final_count);
+        
+        let success = AppResponse::Ok(format!("Cleaned {} stale instances", cleaned));
+        response_to_c_string(&success)
+    } else {
+        let error = AppResponse::DatabaseError("Failed to access instance registry for cleanup".to_string());
+        response_to_c_string(&error)
+    }
+}
+
+/// Get the current generation counter value
+#[no_mangle]
+pub extern "C" fn get_current_generation() -> u64 {
+    GENERATION_COUNTER.load(Ordering::SeqCst)
+}
+
+/// Mark an instance as invalid (useful for hot reload scenarios)
+#[no_mangle]
+pub extern "C" fn invalidate_instance(db_state: *mut AppDbState) -> bool {
+    if db_state.is_null() {
+        return false;
+    }
+
+    let addr = db_state as usize;
+    if let Ok(mut instances) = DB_INSTANCES.lock() {
+        if let Some(info) = instances.get_mut(&addr) {
+            info.is_valid = false;
+            info!("Invalidated instance: {}", addr);
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+// Función auxiliar para validar instancia y actualizar timestamp
+fn validate_and_update_instance(db_state: *mut AppDbState) -> bool {
+    if db_state.is_null() {
+        return false;
+    }
+
+    let addr = db_state as usize;
+    if let Ok(mut instances) = DB_INSTANCES.lock() {
+        if let Some(info) = instances.get_mut(&addr) {
+            if info.is_valid {
+                // Update last_used timestamp
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                info.last_used = now;
+                true
+            } else {
+                warn!("Attempt to use invalid instance: {}", addr);
+                false
+            }
+        } else {
+            warn!("Attempt to use unregistered instance: {}", addr);
+            false
+        }
+    } else {
+        warn!("Failed to access instance registry");
+        false
+    }
+}
 
 // Función auxiliar para convertir AppResponse a C string
 fn response_to_c_string(response: &AppResponse) -> *const c_char {
