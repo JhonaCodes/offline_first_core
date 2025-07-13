@@ -15,6 +15,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::app_response::AppResponse;
 
+// Helper function for safe timestamp generation
+fn safe_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) // Fallback to epoch if time is invalid
+}
+
 // Global registry para tracking de AppDbState instances con generaciones
 // para manejar hot reload scenarios
 #[derive(Clone, Debug)]
@@ -31,7 +39,13 @@ lazy_static::lazy_static! {
 }
 #[no_mangle]
 pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
-    let name_str = unsafe { CStr::from_ptr(name).to_str().unwrap() };
+    let name_str = match unsafe { CStr::from_ptr(name).to_str() } {
+        Ok(s) => s,
+        Err(_) => {
+            warn!("Invalid UTF-8 in database name");
+            return std::ptr::null_mut();
+        }
+    };
 
     // Usar una ruta absoluta o relativa consistente
     let db_path = format!("./{}", name_str);
@@ -47,7 +61,7 @@ pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
             // Register the instance with generation tracking
             let addr = ptr as usize;
             let generation = GENERATION_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            let now = safe_timestamp();
             
             if let Ok(mut instances) = DB_INSTANCES.lock() {
                 instances.insert(addr, InstanceInfo {
@@ -237,7 +251,6 @@ pub extern "C" fn update_data(state: *mut AppDbState, json_ptr: *const c_char) -
         Err(error_ptr) => return error_ptr,
     };
 
-    // Deserializar el JSON a modelo con manejo de errores
     let model: LocalDbModel = match serde_json::from_str(&*json_str) {
         Ok(m) => m,
         Err(e) => {
@@ -461,7 +474,7 @@ pub extern "C" fn is_database_valid(db_state: *mut AppDbState) -> bool {
         if let Some(info) = instances.get_mut(&addr) {
             if info.is_valid {
                 // Update last_used timestamp
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                let now = safe_timestamp();
                 info.last_used = now;
                 true
             } else {
@@ -512,7 +525,7 @@ pub extern "C" fn ping_database(db_state: *mut AppDbState) -> *const c_char {
         if let Some(info) = instances.get_mut(&addr) {
             if info.is_valid {
                 // Update last_used timestamp
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                let now = safe_timestamp();
                 info.last_used = now;
                 
                 let ping_response = format!(
@@ -540,7 +553,7 @@ pub extern "C" fn ping_database(db_state: *mut AppDbState) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn cleanup_stale_instances() -> *const c_char {
     let cleanup_threshold = 300; // 5 minutes in seconds
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let now = safe_timestamp();
     
     if let Ok(mut instances) = DB_INSTANCES.lock() {
         let initial_count = instances.len();
@@ -599,7 +612,7 @@ fn validate_and_update_instance(db_state: *mut AppDbState) -> bool {
         if let Some(info) = instances.get_mut(&addr) {
             if info.is_valid {
                 // Update last_used timestamp
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                let now = safe_timestamp();
                 info.last_used = now;
                 true
             } else {

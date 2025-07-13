@@ -150,8 +150,20 @@ impl AppDbState {
                     return Err(Error::Corrupted("Processing timeout".to_string()));
                 }
                 
-                let json_str = String::from_utf8(bytes.value().to_vec()).unwrap();
-                let model = serde_json::from_str(&json_str).unwrap();
+                let json_str = match String::from_utf8(bytes.value().to_vec()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!("Invalid UTF-8 in stored data for id {}: {}", id, e);
+                        return Err(Error::Corrupted(format!("Invalid UTF-8 encoding: {}", e)));
+                    }
+                };
+                let model = match serde_json::from_str(&json_str) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        warn!("Invalid JSON in stored data for id {}: {}", id, e);
+                        return Err(Error::Corrupted(format!("Invalid JSON format: {}", e)));
+                    }
+                };
                 Ok(Some(model))
             }
             None => {
@@ -178,8 +190,20 @@ impl AppDbState {
         for item in table.iter()? {
             match item {
                 Ok((_, value)) => {
-                    let json_str = String::from_utf8(Vec::from(value.value())).unwrap();
-                    let model: LocalDbModel = serde_json::from_str(&json_str).unwrap();
+                    let json_str = match String::from_utf8(Vec::from(value.value())) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            warn!("Invalid UTF-8 in stored data during get(): {}", e);
+                            continue; // Skip this record and continue with others
+                        }
+                    };
+                    let model: LocalDbModel = match serde_json::from_str(&json_str) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            warn!("Invalid JSON in stored data during get(): {}", e);
+                            continue; // Skip this record and continue with others
+                        }
+                    };
                     models.push(model);
                 }
                 Err(e) => info!("Rust: Error reading item: {:?}", e),
@@ -205,7 +229,13 @@ impl AppDbState {
 
             // Check if exists
             if table.get(model.id.as_str())?.is_some() {
-                let json = serde_json::to_string(&model).unwrap();
+                let json = match serde_json::to_string(&model) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        warn!("Failed to serialize model for update: {}", e);
+                        return Err(Error::Corrupted(format!("Serialization failed: {}", e)));
+                    }
+                };
                 table.insert(model.id.as_str(), json.as_bytes())?;
                 Some(model)
             } else {
