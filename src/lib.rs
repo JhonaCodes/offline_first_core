@@ -8,19 +8,39 @@ use crate::local_db_state::AppDbState;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
-use log::{warn};
+use log::{info, warn};
 
 use crate::app_response::AppResponse;
 
 #[no_mangle]
 pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
-    let name_str = unsafe { CStr::from_ptr(name).to_str().unwrap() };
+    // Verificar si el puntero es nulo
+    if name.is_null() {
+        warn!("Null name pointer passed to create_db");
+        return std::ptr::null_mut();
+    }
+
+    // Manejo seguro de conversión UTF-8
+    let name_str = match unsafe { CStr::from_ptr(name).to_str() } {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Invalid UTF-8 in name parameter: {}", e);
+            return std::ptr::null_mut();
+        }
+    };
 
     // Usar una ruta absoluta o relativa consistente
     let db_path = format!("./{}", name_str);
 
+    // Verificar si la base de datos ya existe
+    if std::path::Path::new(&db_path).exists() {
+        info!("Rust: Database already exists, opening existing database");
+    } else {
+        info!("Rust: Creating new database");
+    }
+
     let state = AppDbState::init(db_path);
-    println!("Rust: Database initialized");
+    info!("Rust: Database initialized");
     
     match state {
         Ok(response) => {
