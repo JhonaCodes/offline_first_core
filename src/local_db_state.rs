@@ -2,11 +2,10 @@ use crate::local_db_model::LocalDbModel;
 use log::{info, warn};
 use redb::{
     Database, DatabaseError, Error, ReadableTable, ReadableTableMetadata, StorageError,
-    TableDefinition, WriteTransaction, ReadTransaction,
+    TableDefinition,
 };
 use std::fs;
 use std::path::Path;
-use std::time::{Duration, Instant};
 use crate::app_response::AppResponse;
 
 // Table definition for redb - required for key-value storage
@@ -16,18 +15,6 @@ pub struct AppDbState {
     db: Database,
     path: String, // Store the path for potential database reset
 }
-
-impl Drop for AppDbState {
-    fn drop(&mut self) {
-        info!("Dropping AppDbState for database: {}", self.path);
-        // ReDB automatically handles proper closure when Database is dropped
-        // File locks and resources are properly released
-    }
-}
-
-// Constants for transaction timeouts
-const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(10);
-const LONG_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl AppDbState {
     pub fn init(name: String) -> Result<Self, DatabaseError> {
@@ -93,92 +80,32 @@ impl AppDbState {
 
     pub fn push(&self, model: LocalDbModel) -> Result<LocalDbModel, AppResponse> {
         let json = serde_json::to_string(&model)?;
-        let start_time = Instant::now();
 
         let write_txn = self.db.begin_write().map_err(AppResponse::from)?;
-        
-        let result = {
-            // Check timeout before proceeding
-            if start_time.elapsed() > TRANSACTION_TIMEOUT {
-                return Err(AppResponse::DatabaseError("Transaction timeout during initialization".to_string()));
-            }
-
+        {
             let mut table = write_txn.open_table(MAIN_TABLE).map_err(AppResponse::from)?;
-            
-            // Check timeout before insert
-            if start_time.elapsed() > TRANSACTION_TIMEOUT {
-                return Err(AppResponse::DatabaseError("Transaction timeout before insert".to_string()));
-            }
-            
             table.insert(model.id.as_str(), json.as_bytes()).map_err(AppResponse::from)?;
-            model
-        };
-
-        // Check timeout before commit
-        if start_time.elapsed() > TRANSACTION_TIMEOUT {
-            return Err(AppResponse::DatabaseError("Transaction timeout before commit".to_string()));
         }
-
         write_txn.commit().map_err(AppResponse::from)?;
-        
-        // Log if operation took long
-        let elapsed = start_time.elapsed();
-        if elapsed > Duration::from_millis(100) {
-            warn!("Push operation took {}ms", elapsed.as_millis());
-        }
 
-        Ok(result)
+        Ok(model)
     }
 
     pub fn get_by_id(&self, id: &str) -> Result<Option<LocalDbModel>, Error> {
-        let start_time = Instant::now();
         let read_txn = self.db.begin_read()?;
-        
-        // Check timeout after transaction start
-        if start_time.elapsed() > TRANSACTION_TIMEOUT {
-            warn!("Read transaction timeout for id: {}", id);
-            return Err(Error::Corrupted("Read timeout".to_string()));
-        }
-        
         let table = read_txn.open_table(MAIN_TABLE)?;
 
-        let result = match table.get(id)? {
+        match table.get(id)? {
             Some(bytes) => {
-                // Check timeout before processing data
-                if start_time.elapsed() > TRANSACTION_TIMEOUT {
-                    warn!("Data processing timeout for id: {}", id);
-                    return Err(Error::Corrupted("Processing timeout".to_string()));
-                }
-                
-                let json_str = match String::from_utf8(bytes.value().to_vec()) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!("Invalid UTF-8 in stored data for id {}: {}", id, e);
-                        return Err(Error::Corrupted(format!("Invalid UTF-8 encoding: {}", e)));
-                    }
-                };
-                let model = match serde_json::from_str(&json_str) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        warn!("Invalid JSON in stored data for id {}: {}", id, e);
-                        return Err(Error::Corrupted(format!("Invalid JSON format: {}", e)));
-                    }
-                };
+                let json_str = String::from_utf8(bytes.value().to_vec()).unwrap();
+                let model = serde_json::from_str(&json_str).unwrap();
                 Ok(Some(model))
             }
             None => {
                 info!("No value found for id {}", id);
                 Ok(None)
             }
-        };
-
-        // Log if operation took long
-        let elapsed = start_time.elapsed();
-        if elapsed > Duration::from_millis(50) {
-            warn!("Get by id operation took {}ms", elapsed.as_millis());
         }
-
-        result
     }
 
     pub fn get(&self) -> Result<Vec<LocalDbModel>, redb::Error> {
@@ -190,20 +117,8 @@ impl AppDbState {
         for item in table.iter()? {
             match item {
                 Ok((_, value)) => {
-                    let json_str = match String::from_utf8(Vec::from(value.value())) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            warn!("Invalid UTF-8 in stored data during get(): {}", e);
-                            continue; // Skip this record and continue with others
-                        }
-                    };
-                    let model: LocalDbModel = match serde_json::from_str(&json_str) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            warn!("Invalid JSON in stored data during get(): {}", e);
-                            continue; // Skip this record and continue with others
-                        }
-                    };
+                    let json_str = String::from_utf8(Vec::from(value.value())).unwrap();
+                    let model: LocalDbModel = serde_json::from_str(&json_str).unwrap();
                     models.push(model);
                 }
                 Err(e) => info!("Rust: Error reading item: {:?}", e),
@@ -229,13 +144,7 @@ impl AppDbState {
 
             // Check if exists
             if table.get(model.id.as_str())?.is_some() {
-                let json = match serde_json::to_string(&model) {
-                    Ok(j) => j,
-                    Err(e) => {
-                        warn!("Failed to serialize model for update: {}", e);
-                        return Err(Error::Corrupted(format!("Serialization failed: {}", e)));
-                    }
-                };
+                let json = serde_json::to_string(&model).unwrap();
                 table.insert(model.id.as_str(), json.as_bytes())?;
                 Some(model)
             } else {

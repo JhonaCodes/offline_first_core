@@ -4,38 +4,15 @@ pub mod tests {
     use crate::local_db_model::LocalDbModel;
     use crate::local_db_state::AppDbState;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    // Helper function for safe timestamp generation in tests
-    fn safe_test_timestamp() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(1640995200) // Fallback to 2022-01-01 timestamp
-    }
     use log::{info, warn};
     use redb::DatabaseError;
 
-    // Función helper para crear modelos de prueba (updated for String data)
+    // Función helper para crear modelos de prueba
     fn create_test_model(id: &str, data: Option<serde_json::Value>) -> LocalDbModel {
-        let data_value = data.unwrap_or(serde_json::json!({"test": "data"}));
-        let data_string = serde_json::to_string(&data_value)
-            .unwrap_or_else(|e| {
-                eprintln!("Failed to serialize test data: {}", e);
-                r#"{"test":"fallback_data"}"#.to_string()
-            });
         LocalDbModel {
             id: id.to_string(),
             hash: format!("hash_{}", id),
-            data: data_string,
-        }
-    }
-    
-    // Helper function to create model with string data directly
-    fn create_test_model_with_string(id: &str, data_json: &str) -> LocalDbModel {
-        LocalDbModel {
-            id: id.to_string(),
-            hash: format!("hash_{}", id),
-            data: data_json.to_string(),
+            data: data.unwrap_or(serde_json::json!({"test": "data"})),
         }
     }
 
@@ -89,7 +66,10 @@ pub mod tests {
     fn generate_unique_db_name(prefix: &str) -> String {
         format!("database_tested_{}_{}",
                 prefix,
-                safe_test_timestamp()
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
         )
     }
     
@@ -433,14 +413,9 @@ pub mod tests {
                 let model = create_test_model("complex", Some(complex_data.clone()));
                 state.push(model).unwrap();
 
-                // Verificar que los datos se mantienen intactos (now as JSON string)
+                // Verificar que los datos se mantienen intactos
                 let retrieved = state.get_by_id("complex").unwrap().unwrap();
-                let expected_json = serde_json::to_string(&complex_data)
-                    .unwrap_or_else(|e| {
-                        eprintln!("Failed to serialize complex_data for comparison: {}", e);
-                        "{}".to_string()
-                    });
-                assert_eq!(retrieved.data, expected_json);
+                assert_eq!(retrieved.data, complex_data);
             },
             Err(_) => {
                 panic!("Error al inicializar la base de datos para test_data_integrity");
@@ -568,7 +543,7 @@ pub mod tests {
 
                 // 5. Verificar la actualización
                 let updated = state.get_by_id("1").unwrap().unwrap();
-                assert_eq!(updated.data, r#"{"test":"updated_data"}"#);
+                assert_eq!(updated.data, serde_json::json!({"test": "updated_data"}));
 
                 // 6. Probar delete
                 assert!(state.delete_by_id("1").unwrap());
@@ -698,11 +673,9 @@ pub mod tests {
                     state.push(model).unwrap();
                 }
 
-                // Verificar que el dato se almacena como string
+                // Verificar que los tipos se mantienen
                 let retrieved = state.get_by_id("number").unwrap().unwrap();
-                // Data is now stored as JSON string - just verify it's not empty
-                assert!(!retrieved.data.is_empty());
-                assert!(retrieved.data.contains("42"));
+                assert!(retrieved.data.is_number());
             },
             Err(_) => {
                 panic!("Error al inicializar la base de datos para test_data_validation");
@@ -762,11 +735,9 @@ pub mod tests {
                     state.update(updated).unwrap();
                 }
 
-                // Verificar que los datos se actualizaron
+                // Verificar consistencia
                 let final_state = state.get_by_id("1").unwrap().unwrap();
-                // Data is stored as JSON string - just verify it contains the updated value
-                assert!(!final_state.data.is_empty());
-                assert!(final_state.data.contains("\"count\":9"));
+                assert_eq!(final_state.data["count"], 9);
             },
             Err(_) => {
                 panic!("Error al inicializar la base de datos para test_data_consistency");
