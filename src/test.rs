@@ -134,30 +134,35 @@ pub mod tests {
     fn cleanup_test_databases() {
         info!("Starting comprehensive test database cleanup...");
 
-        if let Ok(entries) = std::fs::read_dir(".") {
-            let mut cleaned_count = 0;
+        // Multiple cleanup passes to handle locked files
+        for pass in 1..=3 {
+            info!("Cleanup pass {}/3", pass);
             
-            for entry_result in entries {
-                // Handle each entry safely
-                let entry = match entry_result {
-                    Ok(e) => e,
-                    Err(e) => {
-                        warn!("Error reading directory entry: {e}");
-                        continue;
-                    }
-                };
+            if let Ok(entries) = std::fs::read_dir(".") {
+                let mut cleaned_count = 0;
+                
+                for entry_result in entries {
+                    // Handle each entry safely
+                    let entry = match entry_result {
+                        Ok(e) => e,
+                        Err(e) => {
+                            warn!("Error reading directory entry: {e}");
+                            continue;
+                        }
+                    };
 
-                // Handle filename to String conversion
-                let file_name = match entry.file_name().into_string() {
-                    Ok(name) => name,
-                    Err(_) => {
-                        warn!("Error: filename contains invalid characters");
-                        continue;
-                    }
-                };
+                    // Handle filename to String conversion
+                    let file_name = match entry.file_name().into_string() {
+                        Ok(name) => name,
+                        Err(_) => {
+                            warn!("Error: filename contains invalid characters");
+                            continue;
+                        }
+                    };
 
                 // Define patterns for test-related files and directories
-                let should_clean = file_name.starts_with("database_tested_")
+                // Only clean databases that are likely to be old (older than 30 seconds)
+                let should_clean = (file_name.starts_with("database_tested_")
                     || file_name.starts_with("ffi_test_")
                     || file_name.starts_with("edge_case_")
                     || file_name.starts_with("unicode_test_")
@@ -180,7 +185,23 @@ pub mod tests {
                     || file_name.starts_with("invalid_db_")
                     || file_name.ends_with(".lmdb")
                     || file_name.ends_with(".lock")
-                    || file_name.ends_with(".tmp");
+                    || file_name.ends_with(".tmp")) && {
+                        // Check if file/directory is older than 30 seconds
+                        match entry.metadata() {
+                            Ok(metadata) => {
+                                if let Ok(modified) = metadata.modified() {
+                                    if let Ok(elapsed) = modified.elapsed() {
+                                        elapsed.as_secs() > 30
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            },
+                            Err(_) => false
+                        }
+                    };
 
                 if should_clean {
                     let path = entry.path();
@@ -214,13 +235,19 @@ pub mod tests {
                 }
             }
             
-            if cleaned_count > 0 {
-                info!("✅ Cleanup completed: {} test artifacts removed", cleaned_count);
+                if cleaned_count > 0 {
+                    info!("✅ Pass {}: {} test artifacts removed", pass, cleaned_count);
+                } else {
+                    info!("✅ Pass {}: No test artifacts found to clean", pass);
+                }
             } else {
-                info!("✅ No test artifacts found to clean");
+                warn!("Could not read current directory for cleanup in pass {}", pass);
             }
-        } else {
-            warn!("Could not read current directory for cleanup");
+            
+            // Delay between passes to allow file system operations to complete
+            if pass < 3 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
         }
     }
 
@@ -307,12 +334,19 @@ pub mod tests {
     }
 
     fn generate_unique_db_name(prefix: &str) -> String {
-        format!("database_tested_{}_{}",
-                prefix,
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(); // Use seconds instead of nanoseconds
+        let counter = COUNTER.fetch_add(1, Ordering::SeqCst);
+        
+        format!("database_tested_{}_{}_{}", 
+                prefix, 
+                timestamp, 
+                counter
         )
     }
     
@@ -940,7 +974,12 @@ pub mod tests {
     }
     #[test]
     fn test_batch_operations() {
-        match AppDbState::init(generate_unique_db_name("batch")) {
+        cleanup_test_databases();
+        
+        let db_name = generate_unique_db_name("batch");
+        info!("Attempting to initialize database: {}", db_name);
+        
+        match AppDbState::init(db_name) {
             Ok(state) => {
                 // Insert multiple records
                 let models: Vec<_> = (1..100)
@@ -960,8 +999,9 @@ pub mod tests {
                 let remaining = state.get().unwrap();
                 assert_eq!(remaining.len(), 50);
             },
-            Err(_) => {
-                panic!("Error initializing database for test_batch_operations");
+            Err(e) => {
+                eprintln!("Error initializing database for test_batch_operations: {:?}", e);
+                panic!("Error initializing database for test_batch_operations: {:?}", e);
             }
         }
     }
@@ -1147,7 +1187,7 @@ pub mod tests {
         assert!(!result_ptr.is_null());
         let result_str = unsafe { CString::from_raw(result_ptr as *mut i8) };
         let result_json = result_str.to_str().unwrap();
-        assert!(result_json.contains("Ok"));
+        assert!(result_json.contains("\"Ok\":"));
         assert!(result_json.contains("test1"));
         
         // Cleanup
@@ -1172,7 +1212,7 @@ pub mod tests {
         assert!(!result_ptr.is_null());
         let result_str = unsafe { CString::from_raw(result_ptr as *mut i8) };
         let result_json = result_str.to_str().unwrap();
-        assert!(result_json.contains("NotFound"));
+        assert!(result_json.contains("\"NotFound\":"));
         
         // Cleanup
         unsafe {
@@ -1237,7 +1277,7 @@ pub mod tests {
         
         let result_str = unsafe { CString::from_raw(result_ptr as *mut i8) };
         let result_json = result_str.to_str().unwrap();
-        assert!(result_json.contains("Ok"));
+        assert!(result_json.contains("\"Ok\":"));
         assert!(result_json.contains("test1"));
         assert!(result_json.contains("test2"));
         assert!(result_json.contains("test3"));
@@ -1281,7 +1321,7 @@ pub mod tests {
         assert!(!result_ptr.is_null());
         let result_str = unsafe { CString::from_raw(result_ptr as *mut i8) };
         let result_json = result_str.to_str().unwrap();
-        assert!(result_json.contains("Ok"));
+        assert!(result_json.contains("\"Ok\":"));
         assert!(result_json.contains("hash2"));
         
         // Cleanup
@@ -1306,7 +1346,7 @@ pub mod tests {
         assert!(!result_ptr.is_null());
         let result_str = unsafe { CString::from_raw(result_ptr as *mut i8) };
         let result_json = result_str.to_str().unwrap();
-        assert!(result_json.contains("NotFound"));
+        assert!(result_json.contains("\"NotFound\":"));
         
         // Cleanup
         unsafe {
@@ -1368,7 +1408,7 @@ pub mod tests {
         assert!(!result_ptr.is_null());
         let result_str = unsafe { CString::from_raw(result_ptr as *mut i8) };
         let result_json = result_str.to_str().unwrap();
-        assert!(result_json.contains("Ok"));
+        assert!(result_json.contains("\"Ok\":"));
         assert!(result_json.contains("successfully"));
         
         // Cleanup
@@ -1393,7 +1433,7 @@ pub mod tests {
         assert!(!result_ptr.is_null());
         let result_str = unsafe { CString::from_raw(result_ptr as *mut i8) };
         let result_json = result_str.to_str().unwrap();
-        assert!(result_json.contains("NotFound"));
+        assert!(result_json.contains("\"NotFound\":"));
         
         // Cleanup
         unsafe {
@@ -1458,7 +1498,7 @@ pub mod tests {
         
         let result_str = unsafe { CString::from_raw(result_ptr as *mut i8) };
         let result_json = result_str.to_str().unwrap();
-        assert!(result_json.contains("Ok"));
+        assert!(result_json.contains("\"Ok\":"));
         assert!(result_json.contains("cleared"));
         
         // Cleanup
@@ -1500,7 +1540,7 @@ pub mod tests {
         assert!(!result_ptr.is_null());
         let result_str = unsafe { CString::from_raw(result_ptr as *mut i8) };
         let result_json = result_str.to_str().unwrap();
-        assert!(result_json.contains("Ok"));
+        assert!(result_json.contains("\"Ok\":"));
         assert!(result_json.contains("reset successfully"));
         
         // Cleanup
@@ -1558,7 +1598,7 @@ pub mod tests {
         
         let result_str = unsafe { CString::from_raw(result_ptr as *mut i8) };
         let result_json = result_str.to_str().unwrap();
-        assert!(result_json.contains("Ok"));
+        assert!(result_json.contains("\"Ok\":"));
         assert!(result_json.contains("closed successfully"));
         
         // Cleanup
@@ -1899,9 +1939,9 @@ pub mod tests {
         cleanup_test_databases();
         
         // Create multiple database instances
-        let db1 = AppDbState::init("multi_db_test_1".to_string()).unwrap();
-        let db2 = AppDbState::init("multi_db_test_2".to_string()).unwrap();
-        let db3 = AppDbState::init("multi_db_test_3".to_string()).unwrap();
+        let db1 = AppDbState::init(generate_unique_db_name("multi_db_test_1")).unwrap();
+        let db2 = AppDbState::init(generate_unique_db_name("multi_db_test_2")).unwrap();
+        let db3 = AppDbState::init(generate_unique_db_name("multi_db_test_3")).unwrap();
         
         // Insert different data in each
         for i in 1..=3 {
@@ -2246,30 +2286,58 @@ pub mod tests {
     fn test_hot_restart_simulation() {
         cleanup_test_databases();
         
+        let db_name = generate_unique_db_name("hot_restart_test");
+        
         // Simulate initial Flutter app start
         {
-            let state = AppDbState::init("hot_restart_test".to_string()).unwrap();
+            let state = AppDbState::init(db_name.clone()).unwrap();
             
             // Insert some data
             for i in 1..=5 {
                 let model = create_test_model(&format!("persistent_data_{}", i), None);
                 state.push(model).unwrap();
+                info!("Inserted persistent_data_{}", i);
             }
             
-            // Simulate close before hot restart
+            // Verify data is there before closing
+            let all_records = state.get().unwrap();
+            assert_eq!(all_records.len(), 5, "Data should be present before closing");
+            info!("Verified {} records before close", all_records.len());
+            
+            // Simulate close before hot restart  
             let mut state_mut = state;
             let _ = state_mut.close_database();
+            
+            // Add explicit delay to ensure file system operations complete
+            std::thread::sleep(std::time::Duration::from_millis(500));
             
             // Drop the state (simulating app termination)
             drop(state_mut);
         }
         
+        // Add delay before restart
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        
+        // Check if database directory exists
+        let db_path = format!("{}.lmdb", db_name);
+        info!("Checking if database path exists: {}", db_path);
+        if std::path::Path::new(&db_path).exists() {
+            info!("Database path exists");
+        } else {
+            panic!("Database path does not exist: {}", db_path);
+        }
+        
         // Simulate hot restart (reopening the same database)
         {
-            let state = AppDbState::init("hot_restart_test".to_string()).unwrap();
+            info!("Reopening database: {}", db_name);
+            let state = AppDbState::init(db_name.clone()).unwrap();
             
             // Verify data persisted
             let all_records = state.get().unwrap();
+            info!("After restart, found {} records", all_records.len());
+            for record in &all_records {
+                info!("Found record: {}", record.id);
+            }
             assert_eq!(all_records.len(), 5, "Data should persist through hot restart");
             
             for i in 1..=5 {
@@ -2296,12 +2364,18 @@ pub mod tests {
         cleanup_test_databases();
         
         // Create multiple database instances and ensure proper cleanup
-        let instances = (0..5).map(|i| {
-            let state = AppDbState::init(format!("cleanup_test_{}", i)).unwrap();
+        let db_names: Vec<String> = (0..5).map(|i| generate_unique_db_name(&format!("cleanup_test_{}", i))).collect();
+        
+        let instances = db_names.iter().enumerate().map(|(i, db_name)| {
+            let state = AppDbState::init(db_name.clone()).unwrap();
             
             // Add some data to each
             let model = create_test_model(&format!("data_{}", i), None);
             state.push(model).unwrap();
+            
+            // Verify data was inserted
+            let records = state.get().unwrap();
+            assert_eq!(records.len(), 1, "Should have 1 record in instance {}", i);
             
             state
         }).collect::<Vec<_>>();
@@ -2315,10 +2389,14 @@ pub mod tests {
         // Drop all instances
         drop(instances);
         
+        // Add delay to ensure file system operations complete
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        
         // Verify we can still create new instances
-        for i in 0..5 {
-            let state = AppDbState::init(format!("cleanup_test_{}", i)).unwrap();
+        for (i, db_name) in db_names.iter().enumerate() {
+            let state = AppDbState::init(db_name.clone()).unwrap();
             let records = state.get().unwrap();
+            info!("Instance {} has {} records after restart", i, records.len());
             assert_eq!(records.len(), 1, "Data should persist for instance {}", i);
         }
         
