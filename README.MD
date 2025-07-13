@@ -412,12 +412,6 @@ async function saveData(id, data) {
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🙏 Acknowledgments
-
-- [LMDB team](https://www.symas.com/lmdb) for the robust database engine
-- [redb](https://github.com/cberner/redb) project for inspiration
-- Rust community for excellent FFI tools
-
 ---
 
 <div align="center">
