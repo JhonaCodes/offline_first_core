@@ -140,8 +140,7 @@ pub extern "C" fn get_by_id(state: *mut AppDbState, id: *const c_char) -> *const
             response_to_c_string(&error)
         },
         Err(e) => {
-            // Asumiendo que e ya es o puede convertirse a AppResponse
-            let error = AppResponse::DatabaseError(format!("Error in get_by_id: {:?}", e));
+            let error = AppResponse::from(e);
             response_to_c_string(&error)
         }
     }
@@ -172,7 +171,7 @@ pub extern "C" fn get_all(state: *mut AppDbState) -> *const c_char {
             }
         },
         Err(e) => {
-            let error = AppResponse::DatabaseError(format!("Error in get_all: {:?}", e));
+            let error = AppResponse::from(e);
             response_to_c_string(&error)
         }
     }
@@ -229,7 +228,7 @@ pub extern "C" fn update_data(state: *mut AppDbState, json_ptr: *const c_char) -
             response_to_c_string(&error)
         },
         Err(e) => {
-            let error = AppResponse::DatabaseError(format!("Error updating model: {:?}", e));
+            let error = AppResponse::from(e);
             response_to_c_string(&error)
         }
     }
@@ -268,7 +267,7 @@ pub extern "C" fn delete_by_id(db_state: *mut AppDbState, id: *const c_char) -> 
             response_to_c_string(&not_found)
         },
         Err(e) => {
-            let error = AppResponse::DatabaseError(format!("Error deleting record: {:?}", e));
+            let error = AppResponse::from(e);
             response_to_c_string(&error)
         }
     }
@@ -292,7 +291,7 @@ pub extern "C" fn clear_all_records(db_state: *mut AppDbState) -> *const c_char 
             response_to_c_string(&success)
         },
         Err(e) => {
-            let error = AppResponse::DatabaseError(format!("Error clearing records: {:?}", e));
+            let error = AppResponse::from(e);
             response_to_c_string(&error)
         }
     }
@@ -328,6 +327,30 @@ pub extern "C" fn reset_database(db_state: *mut AppDbState, name_ptr: *const c_c
         },
         Err(e) => {
             let error = AppResponse::DatabaseError(format!("Error resetting database: {:?}", e));
+            response_to_c_string(&error)
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn close_database(db_state: *mut AppDbState) -> *const c_char {
+    // Verificar que el puntero no sea nulo
+    if db_state.is_null() {
+        let error = AppResponse::BadRequest("Null state pointer passed to close_database".to_string());
+        return response_to_c_string(&error);
+    }
+
+    // Acceder al estado de la base de datos de manera segura
+    let db_state = unsafe { &mut *db_state };
+
+    // Llamar a la implementación de close_database
+    match db_state.close_database() {
+        Ok(_) => {
+            let success = AppResponse::Ok("Database connection closed successfully".to_string());
+            response_to_c_string(&success)
+        },
+        Err(e) => {
+            let error = AppResponse::from(e);
             response_to_c_string(&error)
         }
     }
