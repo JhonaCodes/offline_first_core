@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter};
 
-use redb::{CommitError, Error as RedbError, StorageError, TableError, TransactionError};
+use lmdb::Error as LmdbError;
 use serde::{Deserialize, Serialize};
 use serde_json::Error as SerdeError;
 
@@ -27,16 +27,51 @@ impl Display for AppResponse {
     }
 }
 
-impl From<RedbError> for AppResponse {
-    fn from(err: RedbError) -> Self {
+impl From<LmdbError> for AppResponse {
+    fn from(err: LmdbError) -> Self {
         match err {
-            RedbError::TableDoesNotExist(name) =>
-                AppResponse::NotFound(format!("Table '{}' not found", name)),
-            RedbError::Corrupted(msg) =>
-                AppResponse::DatabaseError(format!("Database is corrupted: {}", msg)),
-            RedbError::Io(io_err) =>
-                AppResponse::DatabaseError(format!("IO error: {}", io_err)),
-            _ => AppResponse::DatabaseError(format!("Database error: {:?}", err)),
+            LmdbError::KeyExist =>
+                AppResponse::BadRequest("Key already exists".to_string()),
+            LmdbError::NotFound =>
+                AppResponse::NotFound("Record not found".to_string()),
+            LmdbError::Corrupted =>
+                AppResponse::DatabaseError("Database is corrupted".to_string()),
+            LmdbError::Panic =>
+                AppResponse::DatabaseError("Database panic occurred".to_string()),
+            LmdbError::MapFull =>
+                AppResponse::DatabaseError("Database map is full".to_string()),
+            LmdbError::DbsFull =>
+                AppResponse::DatabaseError("Maximum databases reached".to_string()),
+            LmdbError::ReadersFull =>
+                AppResponse::DatabaseError("Maximum readers reached".to_string()),
+            LmdbError::TxnFull =>
+                AppResponse::DatabaseError("Transaction is full".to_string()),
+            LmdbError::CursorFull =>
+                AppResponse::DatabaseError("Cursor stack is full".to_string()),
+            LmdbError::PageFull =>
+                AppResponse::DatabaseError("Page is full".to_string()),
+            LmdbError::MapResized =>
+                AppResponse::DatabaseError("Database map was resized".to_string()),
+            LmdbError::Incompatible =>
+                AppResponse::DatabaseError("Database is incompatible".to_string()),
+            LmdbError::BadRslot =>
+                AppResponse::DatabaseError("Bad reader locktable slot".to_string()),
+            LmdbError::BadTxn =>
+                AppResponse::DatabaseError("Invalid transaction".to_string()),
+            LmdbError::BadValSize =>
+                AppResponse::DatabaseError("Value size is invalid".to_string()),
+            LmdbError::BadDbi =>
+                AppResponse::DatabaseError("Invalid database handle".to_string()),
+            LmdbError::Other(code) =>
+                AppResponse::DatabaseError(format!("LMDB error code: {}", code)),
+            LmdbError::PageNotFound =>
+                AppResponse::DatabaseError("Page not found".to_string()),
+            LmdbError::VersionMismatch =>
+                AppResponse::DatabaseError("Version mismatch".to_string()),
+            LmdbError::Invalid =>
+                AppResponse::DatabaseError("Invalid LMDB file".to_string()),
+            LmdbError::TlsFull =>
+                AppResponse::DatabaseError("TLS keys full".to_string()),
         }
     }
 }
@@ -47,29 +82,6 @@ impl From<SerdeError> for AppResponse {
     }
 }
 
-impl From<TransactionError> for AppResponse {
-    fn from(err: TransactionError) -> Self {
-        AppResponse::DatabaseError(format!("Transaction error: {:?}", err))
-    }
-}
-
-impl From<TableError> for AppResponse {
-    fn from(err: TableError) -> Self {
-        AppResponse::DatabaseError(format!("Table operation error: {:?}", err))
-    }
-}
-
-impl From<StorageError> for AppResponse {
-    fn from(err: StorageError) -> Self {
-        AppResponse::DatabaseError(format!("Error de almacenamiento en la base de datos: {:?}", err))
-    }
-}
-
-impl From<CommitError> for AppResponse {
-    fn from(err: CommitError) -> Self {
-        AppResponse::DatabaseError(format!("Error al confirmar la transacción: {:?}", err))
-    }
-}
 
 impl AppResponse {
     pub fn success(msg: impl Into<String>) -> Self {

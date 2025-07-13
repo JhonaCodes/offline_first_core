@@ -1,190 +1,160 @@
 use crate::local_db_model::LocalDbModel;
 use log::{info, warn};
-use redb::{
-    Database, DatabaseError, Error, ReadableTable, ReadableTableMetadata, StorageError,
-    TableDefinition,
-};
+use lmdb::{Environment, Database, Transaction, WriteFlags, Cursor, DatabaseFlags, Error as LmdbError};
 use std::fs;
 use std::path::Path;
 use crate::app_response::AppResponse;
 
-// Table definition for redb - required for key-value storage
-const MAIN_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("main");
+const MAIN_DB_NAME: &str = "main";
 
 pub struct AppDbState {
+    env: Environment,
     db: Database,
     path: String, // Store the path for potential database reset
 }
 
 impl AppDbState {
-    pub fn init(name: String) -> Result<Self, DatabaseError> {
-        let path = Path::new(&name);
-
-        // Abrir la base de datos o crearla si no existe
-        let db = match Database::open(path) {
-            Ok(response) => {
-                info!("Opened existing database at {}", name);
-                response
-            }
-            Err(_) => {
-                info!("Creating new database at {}", name);
-                match Database::create(path) {
-                    Ok(response) => {
-                        info!("Database created");
-                        response
-                    }
-                    Err(err) => {
-                        warn!("Error on creating database: {}", err);
-                        return Err(DatabaseError::Storage(StorageError::Corrupted(String::from("Error when trying to create database"))));
-                    }
-                }
-            }
-        };
-
-        // Iniciar transacción de escritura
-        let write_txn = match db.begin_write() {
-            Ok(txn) => txn,
-            Err(err) => {
-                warn!("Error beginning write transaction: {}", err);
-                return Err(DatabaseError::Storage(StorageError::Corrupted(String::from("Error beginning write transaction"))));
-            }
-        };
-
-        // Abrir o crear tabla
-        match write_txn.open_table(MAIN_TABLE) {
-            Ok(_) => {
-                info!("Table opened successfully")
-            },
-            Err(err) => {
-                warn!("Error opening table: {}", err);
-                return Err(DatabaseError::Storage(StorageError::Corrupted(String::from("Error opening table"))));
-            }
+    pub fn init(name: String) -> Result<Self, LmdbError> {
+        // LMDB necesita un directorio, no un archivo
+        let db_dir = format!("{}.lmdb", name);
+        let path = Path::new(&db_dir);
+        
+        // Crear el directorio si no existe
+        if !path.exists() {
+            fs::create_dir_all(path).map_err(|_| LmdbError::Other(2))?;
         }
-
-        // Confirmar transacción
-        match write_txn.commit() {
-            Ok(_) => {
-                info!("Transaction committed successfully")
-            },
-            Err(err) => {
-                warn!("Error committing transaction: {}", err);
-                return Err(DatabaseError::Storage(StorageError::Corrupted(String::from("Error committing transaction"))));
-            }
-        }
-
+        
+        // Crear o abrir el environment LMDB
+        let env = Environment::new()
+            .set_max_dbs(10)
+            .set_map_size(1024 * 1024 * 1024) // 1GB
+            .open(path)?;
+        
+        info!("LMDB environment opened at {}", name);
+        
+        // Abrir o crear la base de datos principal
+        let db = env.create_db(Some(MAIN_DB_NAME), DatabaseFlags::empty())?;
+        
+        info!("Database initialized successfully");
+        
         Ok(Self {
+            env,
             db,
-            path: name
+            path: db_dir
         })
     }
 
     pub fn push(&self, model: LocalDbModel) -> Result<LocalDbModel, AppResponse> {
         let json = serde_json::to_string(&model)?;
-
-        let write_txn = self.db.begin_write().map_err(AppResponse::from)?;
-        {
-            let mut table = write_txn.open_table(MAIN_TABLE).map_err(AppResponse::from)?;
-            table.insert(model.id.as_str(), json.as_bytes()).map_err(AppResponse::from)?;
-        }
-        write_txn.commit().map_err(AppResponse::from)?;
-
+        
+        let mut txn = self.env.begin_rw_txn().map_err(AppResponse::from)?;
+        txn.put(self.db, &model.id, &json, WriteFlags::empty()).map_err(AppResponse::from)?;
+        txn.commit().map_err(AppResponse::from)?;
+        
         Ok(model)
     }
 
-    pub fn get_by_id(&self, id: &str) -> Result<Option<LocalDbModel>, Error> {
-        let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(MAIN_TABLE)?;
-
-        match table.get(id)? {
-            Some(bytes) => {
-                let json_str = String::from_utf8(bytes.value().to_vec()).unwrap();
-                let model = serde_json::from_str(&json_str).unwrap();
+    pub fn get_by_id(&self, id: &str) -> Result<Option<LocalDbModel>, LmdbError> {
+        let txn = self.env.begin_ro_txn()?;
+        
+        match txn.get(self.db, &id) {
+            Ok(bytes) => {
+                let json_str = std::str::from_utf8(bytes)
+                    .map_err(|_| LmdbError::Other(1))?;
+                let model = serde_json::from_str(json_str)
+                    .map_err(|_| LmdbError::Other(1))?;
                 Ok(Some(model))
             }
-            None => {
+            Err(LmdbError::NotFound) => {
                 info!("No value found for id {}", id);
                 Ok(None)
             }
+            Err(e) => Err(e)
         }
     }
 
-    pub fn get(&self) -> Result<Vec<LocalDbModel>, redb::Error> {
+    pub fn get(&self) -> Result<Vec<LocalDbModel>, LmdbError> {
         let mut models = Vec::new();
-
-        let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(MAIN_TABLE)?;
-
-        for item in table.iter()? {
-            match item {
-                Ok((_, value)) => {
-                    let json_str = String::from_utf8(Vec::from(value.value())).unwrap();
-                    let model: LocalDbModel = serde_json::from_str(&json_str).unwrap();
-                    models.push(model);
+        
+        let txn = self.env.begin_ro_txn()?;
+        let mut cursor = txn.open_ro_cursor(self.db)?;
+        
+        for (_, value) in cursor.iter() {
+            match std::str::from_utf8(value) {
+                Ok(json_str) => {
+                    match serde_json::from_str::<LocalDbModel>(json_str) {
+                        Ok(model) => models.push(model),
+                        Err(e) => info!("Error deserializing model: {:?}", e),
+                    }
                 }
-                Err(e) => info!("Rust: Error reading item: {:?}", e),
+                Err(e) => info!("Error converting to UTF-8: {:?}", e),
             }
         }
-
+        
         Ok(models)
     }
 
-    pub fn delete_by_id(&self, id: &str) -> Result<bool, redb::Error> {
-        let write_txn = self.db.begin_write()?;
-        let mut table = write_txn.open_table(MAIN_TABLE)?;
-        let existed = table.remove(id)?.is_some();
-        drop(table); // Explícitamente liberamos la tabla
-        write_txn.commit()?;
+    pub fn delete_by_id(&self, id: &str) -> Result<bool, LmdbError> {
+        let mut txn = self.env.begin_rw_txn()?;
+        
+        // Verificar si existe antes de eliminar
+        let existed = match txn.get(self.db, &id) {
+            Ok(_) => true,
+            Err(LmdbError::NotFound) => false,
+            Err(e) => return Err(e),
+        };
+        
+        if existed {
+            txn.del(self.db, &id, None)?;
+        }
+        
+        txn.commit()?;
         Ok(existed)
     }
 
-    pub fn update(&self, model: LocalDbModel) -> Result<Option<LocalDbModel>, redb::Error> {
-        let write_txn = self.db.begin_write()?;
-        let result = {
-            let mut table = write_txn.open_table(MAIN_TABLE)?;
-
-            // Check if exists
-            if table.get(model.id.as_str())?.is_some() {
-                let json = serde_json::to_string(&model).unwrap();
-                table.insert(model.id.as_str(), json.as_bytes())?;
-                Some(model)
-            } else {
-                None
-            }
-        }; // La tabla se libera aquí
-        write_txn.commit()?;
-        Ok(result)
+    pub fn update(&self, model: LocalDbModel) -> Result<Option<LocalDbModel>, LmdbError> {
+        let mut txn = self.env.begin_rw_txn()?;
+        
+        // Verificar si existe
+        let exists = match txn.get(self.db, &model.id) {
+            Ok(_) => true,
+            Err(LmdbError::NotFound) => false,
+            Err(e) => return Err(e),
+        };
+        
+        if exists {
+            let json = serde_json::to_string(&model)
+                .map_err(|_| LmdbError::Other(1))?;
+            txn.put(self.db, &model.id, &json, WriteFlags::empty())?;
+            txn.commit()?;
+            Ok(Some(model))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Deletes all records from the database while maintaining the database structure
     /// Returns the number of records deleted
     /// This is useful when you want to clear data but keep using the same database
-    pub fn clear_all_records(&self) -> Result<usize, redb::Error> {
-        let write_txn = self.db.begin_write()?; // Iniciar transacción de escritura
+    pub fn clear_all_records(&self) -> Result<usize, LmdbError> {
+        let mut txn = self.env.begin_rw_txn()?;
         let mut count = 0;
-
-        {
-            let mut table = write_txn.open_table(MAIN_TABLE)?;
-
-            if table.is_empty()? {
-                return Ok(0);
-            }
-
-            let keys: Vec<String> = table
-                .iter()?
-                .filter_map(|entry| entry.ok())
-                .map(|(k, _)| k.value().to_string())
-                .collect();
-
-            for key in keys {
-                if let Err(e) = table.remove(key.as_str()) {
-                    warn!("Error on deleting key: {:?}", e);
-                } else {
-                    count += 1;
-                }
+        
+        // Recopilar todas las claves primero
+        let keys: Vec<Vec<u8>> = {
+            let mut cursor = txn.open_ro_cursor(self.db)?;
+            cursor.iter()
+                .map(|(key, _)| key.to_vec())
+                .collect()
+        };
+        
+        for key in keys {
+            match txn.del(self.db, &key, None) {
+                Ok(_) => count += 1,
+                Err(e) => warn!("Error deleting key: {:?}", e),
             }
         }
-
-        write_txn.commit()?;
+        txn.commit()?;
         Ok(count)
     }
 
@@ -195,23 +165,47 @@ impl AppDbState {
     /// This is useful when you want to start completely fresh
     /// Returns true if successful
     pub fn reset_database(&mut self, name: &str) -> Result<bool, Box<dyn std::error::Error>> {
-        // Delete the database file
-        fs::remove_file(&self.path)?;
-
-        // Create a new database
-        let path = Path::new(name);
-        let new_db = Database::create(path)?;
-
-        // Initialize the table structure
-        {
-            let write_txn = new_db.begin_write()?;
-            write_txn.open_table(MAIN_TABLE)?;
-            write_txn.commit()?;
+        // El environment actual se cerrará automáticamente cuando se reemplace
+        
+        // Eliminar el directorio de la base de datos
+        if Path::new(&self.path).exists() {
+            fs::remove_dir_all(&self.path)?;
         }
-
-        // Update our database reference
+        
+        // Crear nueva base de datos
+        let new_db_dir = format!("{}.lmdb", name);
+        let path = Path::new(&new_db_dir);
+        
+        // Crear el directorio si no existe
+        if !path.exists() {
+            fs::create_dir_all(path)?;
+        }
+        
+        // Crear nuevo environment
+        let new_env = Environment::new()
+            .set_max_dbs(10)
+            .set_map_size(1024 * 1024 * 1024)
+            .open(path)?;
+            
+        // Abrir nueva base de datos
+        let new_db = new_env.create_db(Some(MAIN_DB_NAME), DatabaseFlags::empty())?;
+        
+        // Actualizar referencias
+        self.env = new_env;
         self.db = new_db;
-
+        self.path = new_db_dir;
+        
         Ok(true)
+    }
+    
+    /// Cierra explícitamente la conexión a la base de datos
+    /// Útil para liberar recursos antes de hot restart
+    /// Nota: En LMDB, las conexiones se cierran automáticamente cuando el Environment se dropea
+    /// Esta función sirve como indicador explícito de que la conexión ya no debe usarse
+    pub fn close_database(&mut self) -> Result<(), LmdbError> {
+        // En LMDB, no podemos cerrar explícitamente sin hacer drop del Environment
+        // El Environment se cerrará automáticamente cuando el struct se dropee
+        info!("Database connection will be closed when AppDbState is dropped");
+        Ok(())
     }
 }
