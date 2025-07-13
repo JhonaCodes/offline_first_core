@@ -84,7 +84,7 @@ pub mod tests {
                 assert_eq!(result.id, model.id);
                 assert_eq!(result.hash, model.hash);
 
-                // Verificar que se guardó correctamente
+                // Verify that it was saved correctly
                 let stored = results.get_by_id("1").unwrap().unwrap();
                 assert_eq!(stored.id, model.id);
             }
@@ -171,11 +171,11 @@ pub mod tests {
 
         match state {
             Ok(response) => {
-                // Probar con ID que no existe
+                // Test with non-existent ID
                 let no_result = response.get_by_id("nonexistent").unwrap();
                 assert!(no_result.is_none());
 
-                // Probar con ID existente
+                // Test with existing ID
                 let model = create_test_model("1", None);
                 response.push(model.clone()).unwrap();
 
@@ -199,32 +199,32 @@ pub mod tests {
                 // Asegurarnos de que empezamos con una base de datos limpia
                 state.reset_database(&db_name).unwrap();
 
-                // Ahora sí verificar que está vacía
+                // Now verify that it's empty
                 let empty_results = state.get().unwrap();
-                assert!(empty_results.is_empty(), "La base de datos debería estar vacía inicialmente");
+                assert!(empty_results.is_empty(), "Database should be initially empty");
 
-                // Insertar primer registro y verificar
+                // Insert first record and verify
                 let model1 = create_test_model("1", None);
                 state.push(model1).unwrap();
 
                 let results = state.get().unwrap();
-                assert_eq!(results.len(), 1, "Debería haber exactamente 1 registro");
+                assert_eq!(results.len(), 1, "Should have exactly 1 record");
 
-                // Insertar segundo registro y verificar
+                // Insert second record and verify
                 let model2 = create_test_model("2", None);
                 state.push(model2).unwrap();
 
                 let results = state.get().unwrap();
-                assert_eq!(results.len(), 2, "Debería haber exactamente 2 registros");
+                assert_eq!(results.len(), 2, "Should have exactly 2 records");
 
-                // Insertar tercer registro y verificar
+                // Insert third record and verify
                 let model3 = create_test_model("3", None);
                 state.push(model3).unwrap();
 
                 let results = state.get().unwrap();
-                assert_eq!(results.len(), 3, "Debería haber exactamente 3 registros");
+                assert_eq!(results.len(), 3, "Should have exactly 3 records");
 
-                // Verificar que podemos obtener cada registro individualmente
+                // Verify that we can get each record individually
                 assert!(state.get_by_id("1").unwrap().is_some());
                 assert!(state.get_by_id("2").unwrap().is_some());
                 assert!(state.get_by_id("3").unwrap().is_some());
@@ -238,12 +238,12 @@ pub mod tests {
     fn test_update() {
         match AppDbState::init(generate_unique_db_name("update")) {
             Ok(state) => {
-                // Intentar actualizar un registro que no existe
+                // Try to update a non-existent record
                 let non_existent = create_test_model("999", None);
                 let update_result = state.update(non_existent).unwrap();
                 assert!(update_result.is_none());
 
-                // Actualizar un registro existente
+                // Update an existing record
                 let model = create_test_model("1", Some(serde_json::json!({"original": true})));
                 state.push(model).unwrap();
 
@@ -263,11 +263,11 @@ pub mod tests {
     fn test_delete() {
         match AppDbState::init(generate_unique_db_name("delete")) {
             Ok(state) => {
-                // Intentar eliminar un registro que no existe
+                // Try to delete a non-existent record
                 let delete_result = state.delete_by_id("nonexistent").unwrap();
                 assert!(!delete_result);
 
-                // Eliminar un registro existente
+                // Delete an existing record
                 let model = create_test_model("1", None);
                 state.push(model).unwrap();
 
@@ -290,7 +290,7 @@ pub mod tests {
                 let count = state.clear_all_records().unwrap();
                 assert_eq!(count, 0);
 
-                // Limpiar DB con registros
+                // Clear DB with records
                 for i in 1..=3 {
                     state.push(create_test_model(&i.to_string(), None)).unwrap();
                 }
@@ -310,7 +310,7 @@ pub mod tests {
     fn test_reset_database() {
         match AppDbState::init(generate_unique_db_name("reset")) {
             Ok(mut state) => {
-                // Añadir algunos registros
+                // Add some records
                 for i in 1..=3 {
                     state.push(create_test_model(&i.to_string(), None)).unwrap();
                 }
@@ -332,21 +332,21 @@ pub mod tests {
     fn test_basic_operations() {
         match AppDbState::init(generate_unique_db_name("basic")) {
             Ok(state) => {
-                // Insertar varios registros en secuencia
+                // Insert multiple records in sequence
                 for i in 1..=5 {
                     let model = create_test_model(&i.to_string(), None);
                     let result = state.push(model).unwrap();
                     assert_eq!(result.id, i.to_string());
                 }
 
-                // Verificar que todos los registros se insertaron correctamente
+                // Verify that all records were inserted correctly
                 let all_records = state.get().unwrap();
-                assert_eq!(all_records.len(), 5, "Deberían haberse insertado 5 registros");
+                assert_eq!(all_records.len(), 5, "Should have inserted 5 records");
 
-                // Verificar que cada registro existe y tiene los datos correctos
+                // Verify that each record exists and has correct data
                 for i in 1..=5 {
                     let record = state.get_by_id(&i.to_string()).unwrap();
-                    assert!(record.is_some(), "El registro {} debería existir", i);
+                    assert!(record.is_some(), "Record {} should exist", i);
                     let record = record.unwrap();
                     assert_eq!(record.hash, format!("hash_{}", i));
                 }
@@ -373,11 +373,11 @@ pub mod tests {
                     state.push(model).unwrap();
                 }
 
-                // Verificar cantidad total
+                // Verify total count
                 let all_records = state.get().unwrap();
                 assert_eq!(all_records.len(), 100);
 
-                // Verificar rendimiento de búsqueda
+                // Verify search performance
                 let start = std::time::Instant::now();
                 let _result = state.get_by_id("50").unwrap();
                 let duration = start.elapsed();
@@ -410,7 +410,7 @@ pub mod tests {
                 let model = create_test_model("complex", Some(complex_data.clone()));
                 state.push(model).unwrap();
 
-                // Verificar que los datos se mantienen intactos
+                // Verify that data remains intact
                 let retrieved = state.get_by_id("complex").unwrap().unwrap();
                 assert_eq!(retrieved.data, complex_data);
             },
@@ -494,7 +494,7 @@ pub mod tests {
             ])));
                 state.push(nested_array).unwrap();
 
-                // 6. Actualización repetitiva del mismo registro
+                // 6. Repetitive updates of the same record
                 let repeated_model = create_test_model("repeated", None);
                 state.push(repeated_model.clone()).unwrap();
 
@@ -536,14 +536,14 @@ pub mod tests {
                 // Esperar un momento para asegurar que la escritura se completó
                 std::thread::sleep(std::time::Duration::from_millis(100));
 
-                // 2. Verificar get_all
+                // 2. Verify get_all
                 let get_all_data = state.get().unwrap();
-                assert!(!get_all_data.is_empty(), "La base de datos no debería estar vacía");
-                assert_eq!(get_all_data.len(), 1, "Debería haber exactamente un registro");
+                assert!(!get_all_data.is_empty(), "Database should not be empty");
+                assert_eq!(get_all_data.len(), 1, "Should have exactly one record");
 
-                // 3. Verificar get_by_id
+                // 3. Verify get_by_id
                 let result = state.get_by_id("1").unwrap();
-                assert!(result.is_some(), "Debería encontrar el registro con id 1");
+                assert!(result.is_some(), "Should find record with id 1");
                 assert_eq!(result.unwrap().id, "1");
 
                 // 4. Actualizar modelo
@@ -553,7 +553,7 @@ pub mod tests {
 
                 std::thread::sleep(std::time::Duration::from_millis(100));
 
-                // 5. Verificar la actualización
+                // 5. Verify the update
                 let updated = state.get_by_id("1").unwrap().unwrap();
                 assert_eq!(updated.data, serde_json::json!({"test": "updated_data"}));
 
@@ -564,11 +564,11 @@ pub mod tests {
 
                 assert!(state.get_by_id("1").unwrap().is_none());
 
-                // 7. Probar clear_all_records con múltiples registros
+                // 7. Test clear_all_records with multiple records
                 for i in 1..=3 {
                     let model = create_test_model(&i.to_string(), None);
                     state.push(model).unwrap();
-                    // Verificar después de cada inserción
+                    // Verify after each insertion
                     std::thread::sleep(std::time::Duration::from_millis(50));
                     assert!(state.get_by_id(&i.to_string()).unwrap().is_some());
                 }
@@ -578,9 +578,9 @@ pub mod tests {
 
                 std::thread::sleep(std::time::Duration::from_millis(100));
 
-                // 8. Verificar que está vacío después de clear
+                // 8. Verify it's empty after clear
                 let after_clear = state.get().unwrap();
-                assert!(after_clear.is_empty(), "La base de datos debería estar vacía después de clear");
+                assert!(after_clear.is_empty(), "Database should be empty after clear");
 
                 // 9. Reset de la base de datos
                 let new_db_name = format!(
@@ -596,9 +596,9 @@ pub mod tests {
 
                 std::thread::sleep(std::time::Duration::from_millis(100));
 
-                // 10. Verificar que está vacío después del reset
+                // 10. Verify it's empty after reset
                 let final_check = state.get().unwrap();
-                assert!(final_check.is_empty(), "La base de datos debería estar vacía después del reset");
+                assert!(final_check.is_empty(), "Database should be empty after reset");
                 cleanup_test_databases();
             },
             Err(_) => {
@@ -610,7 +610,7 @@ pub mod tests {
     fn test_error_handling() {
         match AppDbState::init(generate_unique_db_name("handling")) {
             Ok(state) => {
-                // Probar operaciones con IDs no existentes
+                // Test operations with non-existent IDs
                 assert!(state.get_by_id("nonexistent").unwrap().is_none());
                 assert!(!state.delete_by_id("nonexistent").unwrap());
                 assert!(state.update(create_test_model("nonexistent", None)).unwrap().is_none());
@@ -633,12 +633,12 @@ pub mod tests {
                 let model = create_test_model("1", None);
                 state.push(model).unwrap();
 
-                // Intentar actualizar y eliminar el mismo registro "simultáneamente"
+                // Try to update and delete the same record "simultaneously"
                 let updated_model = create_test_model("1", Some(serde_json::json!({"updated": true})));
                 state.update(updated_model).unwrap();
                 state.delete_by_id("1").unwrap();
 
-                // Verificar el estado final
+                // Verify final state
                 assert!(state.get_by_id("1").unwrap().is_none());
             },
             Err(_) => {
@@ -654,11 +654,11 @@ pub mod tests {
                 let model = create_test_model("1", None);
                 state.push(model).unwrap();
 
-                // Intentar operaciones que deberían fallar
+                // Try operations that should fail
                 let result = state.get_by_id("nonexistent");
-                assert!(result.is_ok()); // Debería manejar el error gracefully
+                assert!(result.is_ok()); // Should handle error gracefully
 
-                // Verificar que podemos seguir operando después del error
+                // Verify we can continue operating after error
                 let model2 = create_test_model("2", None);
                 assert!(state.push(model2).is_ok());
             },
@@ -685,7 +685,7 @@ pub mod tests {
                     state.push(model).unwrap();
                 }
 
-                // Verificar que los tipos se mantienen
+                // Verify that types are maintained
                 let retrieved = state.get_by_id("number").unwrap().unwrap();
                 assert!(retrieved.data.is_number());
             },
@@ -698,7 +698,7 @@ pub mod tests {
     fn test_batch_operations() {
         match AppDbState::init(generate_unique_db_name("batch")) {
             Ok(state) => {
-                // Insertar múltiples registros
+                // Insert multiple records
                 let models: Vec<_> = (1..100)
                     .map(|i| create_test_model(&i.to_string(), None))
                     .collect();
@@ -707,12 +707,12 @@ pub mod tests {
                     state.push(model).unwrap();
                 }
 
-                // Eliminar múltiples registros
+                // Delete multiple records
                 for i in 1..50 {
                     state.delete_by_id(&i.to_string()).unwrap();
                 }
 
-                // Verificar el estado final
+                // Verify final state
                 let remaining = state.get().unwrap();
                 assert_eq!(remaining.len(), 50);
             },
@@ -725,7 +725,7 @@ pub mod tests {
     fn test_data_consistency() {
         match AppDbState::init(generate_unique_db_name("consistency")) {
             Ok(state) => {
-                // Crear registro inicial
+                // Create initial record
                 let original = create_test_model("1", Some(serde_json::json!({
             "count": 0,
             "timestamp": SystemTime::now()
@@ -747,7 +747,7 @@ pub mod tests {
                     state.update(updated).unwrap();
                 }
 
-                // Verificar consistencia
+                // Verify consistency
                 let final_state = state.get_by_id("1").unwrap().unwrap();
                 assert_eq!(final_state.data["count"], 9);
             },

@@ -1,6 +1,6 @@
 # Native Storage Library
 
-A high-performance local storage library written in Rust, designed for FFI (Foreign Function Interface) integration. This library provides a robust key-value storage solution using `redb`, optimized for embedded systems and mobile applications.
+A high-performance local storage library written in Rust, designed for FFI (Foreign Function Interface) integration. This library provides a robust key-value storage solution using **LMDB** (Lightning Memory-Mapped Database), optimized for embedded systems and mobile applications with superior hot restart support.
 
 
 ## About This Library
@@ -10,13 +10,15 @@ The library exposes a minimal API that helps integrate it as a base for efficien
 
 ## Features
 
-- 🔋 Embedded key-value storage powered by `redb`
+- 🔋 Embedded key-value storage powered by **LMDB**
 - 🔒 ACID compliant transactions
 - 🚀 Zero-copy reads
 - 📱 Optimized for mobile and embedded systems
-- 🛡️ Safe FFI interface
+- 🛡️ Safe FFI interface with hot restart support
 - 🔄 Full CRUD operations
 - 🧪 Comprehensive error handling
+- 🔧 Explicit connection management for Flutter FFI
+- 🏆 Battle-tested LMDB engine (used by OpenLDAP, Bitcoin Core)
 
 ## Usage
 
@@ -30,7 +32,10 @@ const char* push_data(void* state, const char* json_ptr);
 const char* get_by_id(void* state, const char* id);
 const char* get_all(void* state);
 const char* update_data(void* state, const char* json_ptr);
-bool delete_by_id(void* state, const char* id);
+const char* delete_by_id(void* state, const char* id);
+const char* clear_all_records(void* state);
+const char* reset_database(void* state, const char* name);
+const char* close_database(void* state);  // NEW: For hot restart support
 ```
 
 ### Direct Rust Usage
@@ -38,8 +43,8 @@ bool delete_by_id(void* state, const char* id);
 ```rust
 use native_storage::{AppDbState, LocalDbModel};
 
-// Initialize database
-let db = AppDbState::init("my_database.db".to_string());
+// Initialize database (creates my_database.lmdb directory)
+let db = AppDbState::init("my_database".to_string());
 
 // Create data
 let model = LocalDbModel {
@@ -64,7 +69,10 @@ db.delete_by_id("unique_id")?;
 db.clear_all_records()?;
 
 // Reset database
-db.reset_database()?;
+db.reset_database("new_name")?;
+
+// Close database connection (useful for hot restart)
+db.close_database()?;
 ```
 
 ## Implementation Details
@@ -77,25 +85,32 @@ db.reset_database()?;
 
 ### Storage Engine
 
-Uses `redb` with the following configuration:
-- Key-value storage
-- ACID transactions
-- Single table design
+Uses **LMDB** (Lightning Memory-Mapped Database) with the following configuration:
+- Key-value storage with memory mapping
+- ACID transactions with superior consistency
+- Single named database within environment
 - JSON serialization for values
+- Directory-based storage (`.lmdb` directories)
+- 1GB default map size with auto-growth
+- Optimized for FFI and hot restart scenarios
 
 ### Data Model
 
 Data is stored as JSON strings with the following characteristics:
-- String keys (IDs)
-- Serialized JSON values
+- String keys (IDs) - cannot be empty in LMDB
+- Serialized JSON values with size limits
 - UTF-8 encoding
+- Efficient cursor-based iteration
+- Memory-mapped access for performance
 
 ### Error Handling
 
-- Comprehensive error handling for all operations
-- Safe FFI error propagation
-- Null pointer checks
+- Comprehensive LMDB error handling for all operations
+- Safe FFI error propagation with detailed error messages
+- Null pointer checks with improved safety
 - JSON parsing validation
+- **Zero `unwrap()` calls** in production code
+- Graceful handling of LMDB-specific limitations
 
 ## Building
 
@@ -197,9 +212,10 @@ To integrate with your project:
 1. Add to your `Cargo.toml`:
 ```toml
 [dependencies]
-redb = "1.0.0"
+lmdb = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+log = "0.4"
 ```
 
 2. Link with your application:
@@ -229,10 +245,13 @@ crate-type = ["staticlib", "cdylib"]
 
 ## Limitations
 
-- Single table design
-- Synchronous API
+- Single named database per environment
+- Synchronous API (by design for FFI compatibility)
 - JSON-only value storage
 - No built-in encryption
+- **LMDB-specific**: Empty keys not supported
+- **LMDB-specific**: Large values have size restrictions
+- Directory-based storage (not single files)
 
 ## Contributing
 
@@ -245,8 +264,35 @@ Contributions are welcome! Please ensure:
 
 ## Special Thanks
 
-We would like to extend our special thanks to the creators and contributors of [redb](https://github.com/cberner/redb) for their incredible work.
+We would like to extend our special thanks to:
+
+- The creators and contributors of [LMDB](https://www.symas.com/lmdb) for their robust and battle-tested database engine
+- The creators and contributors of [redb](https://github.com/cberner/redb) for their innovative work that inspired our initial implementation
+- The Rust LMDB bindings maintainers for excellent FFI integration
+
 Thank you for your dedication and contribution to the open-source community!
+
+## Migration from redb
+
+**Version 0.3.0** represents a major architectural change from redb to LMDB. This migration was necessary to resolve critical hot restart issues in Flutter FFI scenarios:
+
+### Why We Migrated
+
+1. **Hot Restart Stability**: redb was causing null pointer exceptions during Flutter hot restart cycles
+2. **FFI Robustness**: LMDB provides better memory management for FFI use cases
+3. **Production Stability**: LMDB is used by major projects (OpenLDAP, Bitcoin Core, Mozilla)
+4. **Better Error Handling**: More predictable error scenarios for mobile development
+
+### What Changed
+
+- Database storage format: `.db` files → `.lmdb` directories
+- Error types: redb-specific → LMDB-specific
+- Connection management: Automatic → Explicit `close_database()` available
+- Memory handling: Improved safety and cleanup
+
+### Migration is Automatic
+
+No code changes required for existing Flutter FFI users - the API remains identical.
 
 
 ## License
@@ -254,3 +300,7 @@ MIT License - see [LICENSE](https://github.com/JhonaCodes/flutter_local_db/LICEN
 
 ## Author
 Made with ❤️ by [JhonaCode](https://github.com/JhonaCodes)
+
+---
+
+**v0.3.0** - Now powered by LMDB for superior Flutter FFI stability! 🚀

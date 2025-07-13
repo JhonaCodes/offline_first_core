@@ -1,12 +1,14 @@
 [package]
 name = "offline_first_core"
 repository = "https://github.com/JhonaCodes/offline_first_core"
-version = "0.1.1"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
-license-file = "LICENSE"
-description="This library is designed as a fast-to-compile core, intended to be used as a foundational library for projects like Flutter, native channels, etc."
-readme="README.MD"
+description = "High-performance LMDB-based local storage library optimized for FFI integration with Flutter and cross-platform applications"
+readme = "README.MD"
+keywords = ["lmdb", "ffi", "flutter", "database", "offline"]
+categories = ["database", "embedded", "wasm", "api-bindings"]
+authors = ["JhonaCodes"]
 
 [lib]
 name = "offline_first_core"

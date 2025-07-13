@@ -1,3 +1,9 @@
+//! Database state management and operations.
+//!
+//! This module provides the core database functionality using LMDB (Lightning Memory-Mapped Database)
+//! as the storage engine. It handles all database operations including initialization, CRUD operations,
+//! and connection management.
+
 use crate::local_db_model::LocalDbModel;
 use log::{info, warn};
 use lmdb::{Environment, Database, Transaction, WriteFlags, Cursor, DatabaseFlags, Error as LmdbError};
@@ -5,34 +11,84 @@ use std::fs;
 use std::path::Path;
 use crate::app_response::AppResponse;
 
+/// The default database name within the LMDB environment.
 const MAIN_DB_NAME: &str = "main";
 
+/// Database state container that manages the LMDB environment and database connections.
+///
+/// This struct encapsulates the LMDB environment and database handle, providing
+/// a safe interface for database operations. It maintains the database path for
+/// operations like reset that require filesystem manipulation.
+///
+/// # Examples
+///
+/// ```no_run
+/// use offline_first_core::local_db_state::AppDbState;
+///
+/// // Initialize a new database
+/// let db_state = AppDbState::init("my_database".to_string())?;
+///
+/// // The database is ready for operations
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub struct AppDbState {
+    /// LMDB environment handle
     env: Environment,
+    /// Main database handle within the environment
     db: Database,
-    path: String, // Store the path for potential database reset
+    /// Filesystem path to the database directory
+    path: String,
 }
 
 impl AppDbState {
+    /// Initializes a new database instance or opens an existing one.
+    ///
+    /// This function creates an LMDB environment with the specified name, setting up
+    /// a directory-based storage system. The database is configured with a 1GB memory
+    /// map size and support for up to 10 named databases.
+    ///
+    /// # Parameters
+    ///
+    /// * `name` - The base name for the database. A `.lmdb` extension will be added
+    ///   to create the directory name.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(AppDbState)` on success, or `Err(LmdbError)` if initialization fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use offline_first_core::local_db_state::AppDbState;
+    ///
+    /// // Create or open a database named "user_data"
+    /// let db = AppDbState::init("user_data".to_string())?;
+    ///
+    /// // The database directory will be "./user_data.lmdb"
+    /// # Ok::<(), lmdb::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if:
+    /// - The database directory cannot be created
+    /// - LMDB environment initialization fails
+    /// - The main database cannot be created within the environment
     pub fn init(name: String) -> Result<Self, LmdbError> {
-        // LMDB necesita un directorio, no un archivo
-        let db_dir = format!("{}.lmdb", name);
+        let db_dir = format!("{name}.lmdb");
         let path = Path::new(&db_dir);
         
-        // Crear el directorio si no existe
         if !path.exists() {
             fs::create_dir_all(path).map_err(|_| LmdbError::Other(2))?;
         }
         
-        // Crear o abrir el environment LMDB
         let env = Environment::new()
             .set_max_dbs(10)
             .set_map_size(1024 * 1024 * 1024) // 1GB
             .open(path)?;
         
-        info!("LMDB environment opened at {}", name);
+        info!("LMDB environment opened at {name}");
         
-        // Abrir o crear la base de datos principal
         let db = env.create_db(Some(MAIN_DB_NAME), DatabaseFlags::empty())?;
         
         info!("Database initialized successfully");
@@ -44,6 +100,45 @@ impl AppDbState {
         })
     }
 
+    /// Inserts a new record into the database.
+    ///
+    /// This method serializes the provided model to JSON and stores it using the model's
+    /// ID as the key. The operation is performed within a write transaction to ensure
+    /// data consistency.
+    ///
+    /// # Parameters
+    ///
+    /// * `model` - The data model to insert into the database
+    ///
+    /// # Returns
+    ///
+    /// Returns the inserted model on success, or an error response if the operation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use offline_first_core::{local_db_state::AppDbState, local_db_model::LocalDbModel};
+    /// use serde_json::json;
+    ///
+    /// let db = AppDbState::init("test_db".to_string())?;
+    ///
+    /// let model = LocalDbModel {
+    ///     id: "user_123".to_string(),
+    ///     hash: "abc123".to_string(),
+    ///     data: json!({"name": "John", "age": 30}),
+    /// };
+    ///
+    /// let result = db.push(model)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if:
+    /// - JSON serialization fails
+    /// - Transaction creation fails
+    /// - Database write operation fails
+    /// - Transaction commit fails
     pub fn push(&self, model: LocalDbModel) -> Result<LocalDbModel, AppResponse> {
         let json = serde_json::to_string(&model)?;
         
@@ -54,6 +149,40 @@ impl AppDbState {
         Ok(model)
     }
 
+    /// Retrieves a record from the database by its ID.
+    ///
+    /// This method performs a read-only lookup using the provided ID as the key.
+    /// If found, the JSON data is deserialized back into a `LocalDbModel`.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - The unique identifier of the record to retrieve
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(Some(LocalDbModel))` if the record is found, `Ok(None)` if not found,
+    /// or `Err(LmdbError)` if the operation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use offline_first_core::local_db_state::AppDbState;
+    ///
+    /// let db = AppDbState::init("test_db".to_string())?;
+    ///
+    /// match db.get_by_id("user_123")? {
+    ///     Some(model) => println!("Found user: {:?}", model),
+    ///     None => println!("User not found"),
+    /// }
+    /// # Ok::<(), lmdb::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if:
+    /// - Transaction creation fails
+    /// - The stored data is not valid UTF-8
+    /// - JSON deserialization fails
     pub fn get_by_id(&self, id: &str) -> Result<Option<LocalDbModel>, LmdbError> {
         let txn = self.env.begin_ro_txn()?;
         
@@ -66,13 +195,45 @@ impl AppDbState {
                 Ok(Some(model))
             }
             Err(LmdbError::NotFound) => {
-                info!("No value found for id {}", id);
+                info!("No value found for id {id}");
                 Ok(None)
             }
             Err(e) => Err(e)
         }
     }
 
+    /// Retrieves all records from the database.
+    ///
+    /// This method iterates through all key-value pairs in the database,
+    /// deserializing each JSON value back into a `LocalDbModel`. Records that
+    /// fail to deserialize are logged and skipped.
+    ///
+    /// # Returns
+    ///
+    /// Returns a vector containing all successfully deserialized records,
+    /// or an error if the database operation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use offline_first_core::local_db_state::AppDbState;
+    ///
+    /// let db = AppDbState::init("test_db".to_string())?;
+    ///
+    /// let all_records = db.get()?;
+    /// println!("Found {} records", all_records.len());
+    ///
+    /// for record in all_records {
+    ///     println!("Record ID: {}", record.id);
+    /// }
+    /// # Ok::<(), lmdb::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if:
+    /// - Transaction creation fails
+    /// - Cursor creation fails
     pub fn get(&self) -> Result<Vec<LocalDbModel>, LmdbError> {
         let mut models = Vec::new();
         
@@ -84,20 +245,53 @@ impl AppDbState {
                 Ok(json_str) => {
                     match serde_json::from_str::<LocalDbModel>(json_str) {
                         Ok(model) => models.push(model),
-                        Err(e) => info!("Error deserializing model: {:?}", e),
+                        Err(e) => info!("Error deserializing model: {e:?}"),
                     }
                 }
-                Err(e) => info!("Error converting to UTF-8: {:?}", e),
+                Err(e) => info!("Error converting to UTF-8: {e:?}"),
             }
         }
         
         Ok(models)
     }
 
+    /// Deletes a record from the database by its ID.
+    ///
+    /// This method first checks if the record exists, then removes it if found.
+    /// The operation is performed within a write transaction for consistency.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - The unique identifier of the record to delete
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if a record was deleted, `false` if no record with the given ID exists,
+    /// or an error if the operation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use offline_first_core::local_db_state::AppDbState;
+    ///
+    /// let db = AppDbState::init("test_db".to_string())?;
+    ///
+    /// match db.delete_by_id("user_123")? {
+    ///     true => println!("Record deleted successfully"),
+    ///     false => println!("Record not found"),
+    /// }
+    /// # Ok::<(), lmdb::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if:
+    /// - Transaction creation fails
+    /// - Database operations fail
+    /// - Transaction commit fails
     pub fn delete_by_id(&self, id: &str) -> Result<bool, LmdbError> {
         let mut txn = self.env.begin_rw_txn()?;
         
-        // Verificar si existe antes de eliminar
         let existed = match txn.get(self.db, &id) {
             Ok(_) => true,
             Err(LmdbError::NotFound) => false,
@@ -112,10 +306,51 @@ impl AppDbState {
         Ok(existed)
     }
 
+    /// Updates an existing record in the database.
+    ///
+    /// This method first verifies that a record with the given ID exists, then
+    /// updates it with the new data. If no record exists, the operation returns `None`.
+    ///
+    /// # Parameters
+    ///
+    /// * `model` - The updated model data. The ID field determines which record to update.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(LocalDbModel)` with the updated data if successful, `None` if no
+    /// record with the given ID exists, or an error if the operation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use offline_first_core::{local_db_state::AppDbState, local_db_model::LocalDbModel};
+    /// use serde_json::json;
+    ///
+    /// let db = AppDbState::init("test_db".to_string())?;
+    ///
+    /// let updated_model = LocalDbModel {
+    ///     id: "user_123".to_string(),
+    ///     hash: "new_hash".to_string(),
+    ///     data: json!({"name": "Jane", "age": 25}),
+    /// };
+    ///
+    /// match db.update(updated_model)? {
+    ///     Some(model) => println!("Updated: {:?}", model),
+    ///     None => println!("Record not found for update"),
+    /// }
+    /// # Ok::<(), lmdb::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if:
+    /// - Transaction creation fails
+    /// - JSON serialization fails
+    /// - Database operations fail
+    /// - Transaction commit fails
     pub fn update(&self, model: LocalDbModel) -> Result<Option<LocalDbModel>, LmdbError> {
         let mut txn = self.env.begin_rw_txn()?;
         
-        // Verificar si existe
         let exists = match txn.get(self.db, &model.id) {
             Ok(_) => true,
             Err(LmdbError::NotFound) => false,
@@ -133,14 +368,39 @@ impl AppDbState {
         }
     }
 
-    /// Deletes all records from the database while maintaining the database structure
-    /// Returns the number of records deleted
-    /// This is useful when you want to clear data but keep using the same database
+    /// Removes all records from the database while preserving the database structure.
+    ///
+    /// This method iterates through all records and deletes them individually.
+    /// The database remains operational after this operation and can continue
+    /// to accept new records.
+    ///
+    /// # Returns
+    ///
+    /// Returns the number of records that were deleted, or an error if the operation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use offline_first_core::local_db_state::AppDbState;
+    ///
+    /// let db = AppDbState::init("test_db".to_string())?;
+    ///
+    /// let deleted_count = db.clear_all_records()?;
+    /// println!("Deleted {} records", deleted_count);
+    /// # Ok::<(), lmdb::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if:
+    /// - Transaction creation fails
+    /// - Cursor operations fail
+    /// - Delete operations fail
+    /// - Transaction commit fails
     pub fn clear_all_records(&self) -> Result<usize, LmdbError> {
         let mut txn = self.env.begin_rw_txn()?;
         let mut count = 0;
         
-        // Recopilar todas las claves primero
         let keys: Vec<Vec<u8>> = {
             let mut cursor = txn.open_ro_cursor(self.db)?;
             cursor.iter()
@@ -151,46 +411,72 @@ impl AppDbState {
         for key in keys {
             match txn.del(self.db, &key, None) {
                 Ok(_) => count += 1,
-                Err(e) => warn!("Error deleting key: {:?}", e),
+                Err(e) => warn!("Error deleting key: {e:?}"),
             }
         }
         txn.commit()?;
         Ok(count)
     }
 
-    /// Completely resets the database by:
-    /// 1. Closing the current connection
-    /// 2. Deleting the database file
-    /// 3. Creating a new database
-    /// This is useful when you want to start completely fresh
-    /// Returns true if successful
+    /// Completely resets the database to a clean state with a new name.
+    ///
+    /// This operation performs the following steps:
+    /// 1. Closes the current database environment
+    /// 2. Removes the existing database directory and all its contents
+    /// 3. Creates a new database environment with the specified name
+    /// 4. Updates the internal state to use the new database
+    ///
+    /// # Parameters
+    ///
+    /// * `name` - The new name for the database
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(true)` on success, or an error if any step fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use offline_first_core::local_db_state::AppDbState;
+    ///
+    /// let mut db = AppDbState::init("old_db".to_string())?;
+    ///
+    /// // Reset to a new database
+    /// db.reset_database("new_db")?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if:
+    /// - The existing database directory cannot be removed
+    /// - The new database directory cannot be created
+    /// - LMDB environment initialization fails
+    /// - Database creation within the environment fails
+    ///
+    /// # Safety
+    ///
+    /// This operation is destructive and will permanently delete all data in the current database.
+    /// Ensure that any important data is backed up before calling this method.
     pub fn reset_database(&mut self, name: &str) -> Result<bool, Box<dyn std::error::Error>> {
-        // El environment actual se cerrará automáticamente cuando se reemplace
-        
-        // Eliminar el directorio de la base de datos
         if Path::new(&self.path).exists() {
             fs::remove_dir_all(&self.path)?;
         }
         
-        // Crear nueva base de datos
-        let new_db_dir = format!("{}.lmdb", name);
+        let new_db_dir = format!("{name}.lmdb");
         let path = Path::new(&new_db_dir);
         
-        // Crear el directorio si no existe
         if !path.exists() {
             fs::create_dir_all(path)?;
         }
         
-        // Crear nuevo environment
         let new_env = Environment::new()
             .set_max_dbs(10)
             .set_map_size(1024 * 1024 * 1024)
             .open(path)?;
             
-        // Abrir nueva base de datos
         let new_db = new_env.create_db(Some(MAIN_DB_NAME), DatabaseFlags::empty())?;
         
-        // Actualizar referencias
         self.env = new_env;
         self.db = new_db;
         self.path = new_db_dir;
@@ -198,13 +484,37 @@ impl AppDbState {
         Ok(true)
     }
     
-    /// Cierra explícitamente la conexión a la base de datos
-    /// Útil para liberar recursos antes de hot restart
-    /// Nota: En LMDB, las conexiones se cierran automáticamente cuando el Environment se dropea
-    /// Esta función sirve como indicador explícito de que la conexión ya no debe usarse
+    /// Provides explicit database connection management.
+    ///
+    /// This method serves as an explicit indicator that database resources should be
+    /// cleaned up. While LMDB automatically closes connections when the environment
+    /// is dropped, this function provides a clear signal for connection lifecycle
+    /// management, particularly useful in FFI scenarios like Flutter hot restart.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success. This operation cannot fail as it only provides
+    /// a signal for cleanup rather than performing actual resource deallocation.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use offline_first_core::local_db_state::AppDbState;
+    ///
+    /// let mut db = AppDbState::init("test_db".to_string())?;
+    ///
+    /// // Before hot restart or application shutdown
+    /// db.close_database()?;
+    /// # Ok::<(), lmdb::Error>(())
+    /// ```
+    ///
+    /// # Notes
+    ///
+    /// In LMDB, database connections are automatically managed through RAII.
+    /// The actual cleanup occurs when the `AppDbState` instance is dropped.
+    /// This method primarily serves as documentation and explicit lifecycle management
+    /// for integration scenarios.
     pub fn close_database(&mut self) -> Result<(), LmdbError> {
-        // En LMDB, no podemos cerrar explícitamente sin hacer drop del Environment
-        // El Environment se cerrará automáticamente cuando el struct se dropee
         info!("Database connection will be closed when AppDbState is dropped");
         Ok(())
     }
