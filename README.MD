@@ -384,6 +384,12 @@ async function saveData(id, data) {
 
 ## 📋 Changelog
 
+### v0.5.0 - TEST
+- Update documentation
+
+### v0.4.0 - TEST
+- Improve test cases
+
 ### v0.3.0 - LMDB Migration
 - ✨ Migrated from redb to LMDB
 - ✨ Added `close_database()` function
