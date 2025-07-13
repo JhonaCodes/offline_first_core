@@ -8,3 +8,4 @@ compile.dart
 /fix_ios_lib.sh
 /compile_all_lib.sh
 /fix_macos_lib.sh
+/.claude/settings.local.json
