@@ -1,12 +1,11 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
-/// LocalDbModel with data stored as JSON string for clean FFI handling.
-/// 
-/// Dart handles all complexity - Rust just stores/retrieves strings.
+/// LocalDbModel for communication between Dart and Rust layers.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct LocalDbModel {
     pub id: String,
-    pub hash: String,
-    /// Data as JSON string - Dart encodes/decodes, Rust just stores
-    pub data: String,
+    pub hash: Option<String>,
+    /// Data as JsonValue - matches Dart's Map<String, dynamic>
+    pub data: JsonValue,
 }
