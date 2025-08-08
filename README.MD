@@ -28,7 +28,10 @@ final dylib = DynamicLibrary.open('liboffline_first_core.so');
 // 2. Define FFI functions
 typedef CreateDbNative = Pointer Function(Pointer<Utf8>);
 typedef CreateDb = Pointer Function(Pointer<Utf8>);
+typedef PostDataNative = Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>);
+typedef PostData = Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>);
 final createDb = dylib.lookupFunction<CreateDbNative, CreateDb>('create_db');
+final postData = dylib.lookupFunction<PostDataNative, PostData>('post_data'); // alias: push_data
 
 // 3. Use the database
 final dbPointer = createDb("my_app_database".toNativeUtf8());
@@ -39,7 +42,7 @@ final jsonData = jsonEncode({
   "data": {"name": "John Doe", "email": "john@example.com"}
 });
 
-final result = pushData(dbPointer, jsonData.toNativeUtf8());
+final result = postData(dbPointer, jsonData.toNativeUtf8());
 ```
 
 ### Rust Direct Usage
@@ -59,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         data: json!({"name": "John Doe", "email": "john@example.com"}),
     };
 
-    db.push(user)?;
+    db.post(user)?;
 
     // Retrieve data
     let user = db.get_by_id("user_123")?.unwrap();
@@ -76,10 +79,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Function | Rust | FFI | Description |
 |----------|------|-----|-------------|
 | **Initialize** | `AppDbState::init(name)` | `create_db(name)` | Create or open database |
-| **Insert** | `db.push(model)` | `push_data(db, json)` | Add new record |
+| **Post (Insert)** | `db.post(model)` | `post_data(db, json)` | Add new record |
 | **Get by ID** | `db.get_by_id(id)` | `get_by_id(db, id)` | Retrieve specific record |
 | **Get All** | `db.get()` | `get_all(db)` | Retrieve all records |
-| **Update** | `db.update(model)` | `update_data(db, json)` | Update existing record |
+| **Put (Update)** | `db.put(model)` | `update_data(db, json)` | Update existing record |
 | **Delete** | `db.delete_by_id(id)` | `delete_by_id(db, id)` | Remove record |
 | **Clear** | `db.clear_all_records()` | `clear_all_records(db)` | Remove all records |
 | **Reset** | `db.reset_database(name)` | `reset_database(db, name)` | Reset database |
@@ -116,7 +119,7 @@ fn save_preferences() -> Result<(), Box<dyn std::error::Error>> {
         }),
     };
     
-    db.push(preferences)?;
+    db.post(preferences)?;
     Ok(())
 }
 ```
@@ -137,7 +140,7 @@ fn add_to_cart(product_id: &str, quantity: i32) -> Result<(), Box<dyn std::error
         }),
     };
     
-    db.push(item)?;
+    db.post(item)?;
     Ok(())
 }
 ```
@@ -158,7 +161,7 @@ fn cache_article(article_id: &str, content: &str) -> Result<(), Box<dyn std::err
         }),
     };
     
-    db.push(article)?;
+    db.post(article)?;
     Ok(())
 }
 ```
@@ -170,7 +173,7 @@ fn cache_article(article_id: &str, content: &str) -> Result<(), Box<dyn std::err
 ```rust
 use offline_first_core::{AppDbState, AppResponse};
 
-match db.push(model) {
+match db.post(model) {
     Ok(_) => println!("✅ Success"),
     Err(AppResponse::DatabaseError(msg)) => eprintln!("💾 Database error: {}", msg),
     Err(AppResponse::SerializationError(msg)) => eprintln!("📝 JSON error: {}", msg),
@@ -202,7 +205,13 @@ fn bulk_insert(records: Vec<LocalDbModel>) -> Result<usize, Box<dyn std::error::
 class DatabaseManager {
   static Pointer? _dbPointer;
   
+  // Create or reopen the database
   static void initDatabase() {
+    // Recommended flow: close -> create
+    if (_dbPointer != null) {
+      closeDatabase(_dbPointer!);
+      _dbPointer = null;
+    }
     _dbPointer = createDb("my_app_db".toNativeUtf8());
   }
   
@@ -214,6 +223,11 @@ class DatabaseManager {
   }
 }
 ```
+
+Note:
+- The FFI `create_db` implementation performs a best‑effort clean close if it detects an existing `*.lmdb` directory.
+- Even so, explicitly calling `close_database(db)` before recreating the connection is the safest approach, especially during Flutter hot restart.
+ - For FFI naming aligned to HTTP endpoints, prefer `post_data` and `put_data`. Legacy aliases `push_data` and `update_data` remain available.
 
 ## 🛠️ Setup
 
@@ -252,6 +266,11 @@ cargo build --target x86_64-pc-windows-msvc --release   # Windows
 ```
 
 ## ⚠️ Important Notes
+
+### Lifecycle: Close → Reopen
+
+- Prefer an explicit lifecycle on hot reload/hot restart: first call `close_database(db)` and then call `create_db(name)` again.
+- Internally, `create_db` will try to close any existing environment if the LMDB directory already exists, but explicit close avoids dangling handles in long‑lived runtimes.
 
 ### LMDB Limitations
 
@@ -293,13 +312,13 @@ if (result != NULL) {
 // ✅ DO: Reuse connections
 let db = AppDbState::init("my_db".to_string())?;
 for i in 0..1000 {
-    db.push(create_model(i))?; // Efficient
+    db.post(create_model(i))?; // Efficient
 }
 
 // ❌ DON'T: Create new connections
 for i in 0..1000 {
     let db = AppDbState::init("my_db".to_string())?; // Slow!
-    db.push(create_model(i))?;
+    db.post(create_model(i))?;
 }
 ```
 
@@ -321,7 +340,7 @@ mod tests {
         };
         
         // Insert
-        assert!(db.push(model).is_ok());
+        assert!(db.post(model).is_ok());
         
         // Read
         let retrieved = db.get_by_id("test_1").unwrap();

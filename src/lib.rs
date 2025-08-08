@@ -15,7 +15,7 @@
 //! ## Quick Start
 //!
 //! ```no_run
-//! use offline_first_core::{create_db, push_data, get_by_id};
+//! use offline_first_core::{create_db, post_data as push_data, get_by_id};
 //! use std::ffi::CString;
 //!
 //! // Create database instance
@@ -32,7 +32,7 @@
 //! This library exposes C-compatible functions for cross-language integration:
 //!
 //! - [`create_db`] - Initialize database instance
-//! - [`push_data`] - Insert new records
+//! - [`post_data`] - Insert new records (alias: `push_data`)
 //! - [`get_by_id`] - Retrieve records by ID
 //! - [`get_all`] - Retrieve all records
 //! - [`update_data`] - Update existing records
@@ -52,6 +52,7 @@ use crate::local_db_state::AppDbState;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use log::{info, warn};
+use std::path::Path;
 
 use crate::app_response::AppResponse;
 
@@ -114,9 +115,22 @@ pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
     };
 
     let db_path = format!("./{name_str}");
+    let lmdb_dir = format!("{db_path}.lmdb");
 
-    if std::path::Path::new(&format!("{db_path}.lmdb")).exists() {
-        info!("Database already exists, opening existing database");
+    if Path::new(&lmdb_dir).exists() {
+        info!("Database already exists; attempting clean close before reopen");
+        match AppDbState::init(db_path.clone()) {
+            Ok(mut existing) => {
+                if let Err(e) = existing.close_database() {
+                    warn!("Failed to close existing LMDB environment: {e:?}");
+                } else {
+                    info!("Existing LMDB environment closed successfully");
+                }
+            }
+            Err(e) => {
+                warn!("Could not open existing environment for closing: {e:?}");
+            }
+        }
     } else {
         info!("Creating new database");
     }
@@ -212,6 +226,15 @@ pub extern "C" fn push_data(state: *mut AppDbState, json_ptr: *const c_char) -> 
         },
         Err(e) => response_to_c_string(&e)
     }
+}
+
+/// Inserts a new record into the database (HTTP-style naming).
+///
+/// Alias for [`push_data`]. Provided to align with endpoint semantics.
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn post_data(state: *mut AppDbState, json_ptr: *const c_char) -> *const c_char {
+    push_data(state, json_ptr)
 }
 
 /// Retrieves a record from the database by its ID.
@@ -423,6 +446,15 @@ pub extern "C" fn update_data(state: *mut AppDbState, json_ptr: *const c_char) -
             response_to_c_string(&error)
         }
     }
+}
+
+/// Updates an existing record (HTTP-style naming).
+///
+/// Alias for [`update_data`]. Provided to align with endpoint semantics.
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn put_data(state: *mut AppDbState, json_ptr: *const c_char) -> *const c_char {
+    update_data(state, json_ptr)
 }
 
 /// Deletes a record from the database by its ID.

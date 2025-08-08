@@ -444,6 +444,127 @@ pub mod tests {
     }
 
     #[test]
+    fn test_close_database_blocks_operations() {
+        let db_name = generate_unique_db_name("close_blocks_ops");
+        let mut state = AppDbState::init(db_name.clone()).expect("init should succeed");
+
+        // Write something
+        let model = create_test_model("close_1", None);
+        state.post(model).expect("post before close should succeed");
+
+        // Close database
+        state.close_database().expect("close should succeed");
+
+        // Now operations should fail
+        // get_by_id should return Err
+        let res = state.get_by_id("close_1");
+        assert!(res.is_err(), "get_by_id should error after close");
+
+        // post should also fail and return AppResponse error
+        let err_post = state.post(create_test_model("close_2", None));
+        assert!(err_post.is_err(), "post should error after close");
+
+        // Removing directory after close should succeed
+        let dir = format!("{}.lmdb", db_name);
+        let removed = std::fs::remove_dir_all(&dir);
+        assert!(removed.is_ok(), "should remove lmdb dir after close: {:?}", removed.err());
+    }
+
+    #[test]
+    fn test_reset_database_after_close_allows_recreate() {
+        let db_name = generate_unique_db_name("reset_after_close");
+        let mut state = AppDbState::init(db_name.clone()).expect("init should succeed");
+
+        // Insert data
+        state.post(create_test_model("r1", None)).unwrap();
+        assert!(state.get_by_id("r1").unwrap().is_some());
+
+        // Reset to a new name
+        let new_name = format!("{db_name}_new");
+        state.reset_database(&new_name).expect("reset should succeed");
+
+        // After reset, database should be empty and operable
+        assert!(state.get().unwrap().is_empty(), "new db should be empty");
+        state.post(create_test_model("r2", None)).unwrap();
+        assert!(state.get_by_id("r2").unwrap().is_some());
+    }
+
+    // ===============================
+    // FFI TESTS FOR CREATE/CLOSE FLOW
+    // ===============================
+
+    #[test]
+    fn test_ffi_close_then_reopen_same_name() {
+        use crate::{create_db, push_data, close_database};
+        use std::ffi::CString;
+
+        cleanup_test_databases();
+
+        let name = CString::new(generate_unique_db_name("ffi_close_reopen")).unwrap();
+        let db_ptr = create_db(name.as_ptr());
+        assert!(!db_ptr.is_null(), "create_db should return valid pointer");
+
+        // Insert one record
+        let json = CString::new(r#"{"id":"a1","hash":"h1","data":{"k":1}}"#).unwrap();
+        let res_ptr = push_data(db_ptr, json.as_ptr());
+        assert!(!res_ptr.is_null());
+        unsafe { let _ = CString::from_raw(res_ptr as *mut i8); }
+
+        // Close via FFI
+        let close_ptr = close_database(db_ptr);
+        assert!(!close_ptr.is_null());
+        let close_json = unsafe { CString::from_raw(close_ptr as *mut i8) };
+        assert!(close_json.to_str().unwrap().contains("Ok"));
+
+        // Try to push after close -> should error
+        let json2 = CString::new(r#"{"id":"a2","hash":"h2","data":{"k":2}}"#).unwrap();
+        let res_ptr2 = push_data(db_ptr, json2.as_ptr());
+        assert!(!res_ptr2.is_null());
+        let res2 = unsafe { CString::from_raw(res_ptr2 as *mut i8) };
+        let res2_str = res2.to_str().unwrap();
+        assert!(res2_str.contains("DatabaseError") || res2_str.contains("BadRequest"), "expected error after close, got: {}", res2_str);
+
+        // Reopen with same name
+        let db_ptr2 = create_db(name.as_ptr());
+        assert!(!db_ptr2.is_null(), "re-create should succeed");
+
+        // Insert again -> should succeed on new pointer
+        let json3 = CString::new(r#"{"id":"a3","hash":"h3","data":{"k":3}}"#).unwrap();
+        let res_ptr3 = push_data(db_ptr2, json3.as_ptr());
+        assert!(!res_ptr3.is_null());
+        unsafe { let _ = CString::from_raw(res_ptr3 as *mut i8); }
+
+        // Cleanup heap-allocated states (avoid leaks)
+        unsafe {
+            let _ = Box::from_raw(db_ptr2);
+            let _ = Box::from_raw(db_ptr);
+        }
+    }
+
+    #[test]
+    fn test_ffi_create_db_on_existing_dir_twice() {
+        use crate::create_db;
+        use std::ffi::CString;
+
+        cleanup_test_databases();
+
+        let name = CString::new(generate_unique_db_name("ffi_twice")).unwrap();
+
+        // First create
+        let db1 = create_db(name.as_ptr());
+        assert!(!db1.is_null());
+
+        // Second create on same existing dir: should still succeed
+        let db2 = create_db(name.as_ptr());
+        assert!(!db2.is_null());
+
+        // Cleanup
+        unsafe {
+            let _ = Box::from_raw(db2);
+            let _ = Box::from_raw(db1);
+        }
+    }
+    #[test]
     fn test_get_by_id() {
         let state = AppDbState::init(generate_unique_db_name("get"));
 
@@ -1107,6 +1228,41 @@ pub mod tests {
         unsafe {
             let _db = Box::from_raw(db_ptr);
         }
+    }
+
+    #[test]
+    fn test_ffi_post_and_put_data_success() {
+        use std::ffi::CString;
+        use crate::{create_db, post_data, put_data, get_by_id};
+
+        cleanup_test_databases();
+
+        let db_name = CString::new("ffi_test_post_put").unwrap();
+        let db_ptr = create_db(db_name.as_ptr());
+        assert!(!db_ptr.is_null());
+
+        // Post
+        let json = CString::new(r#"{"id":"p1","hash":"h1","data":{"k":"v"}}"#).unwrap();
+        let res_ptr = post_data(db_ptr, json.as_ptr());
+        assert!(!res_ptr.is_null());
+        unsafe { let _ = CString::from_raw(res_ptr as *mut i8); }
+
+        // Put
+        let json_upd = CString::new(r#"{"id":"p1","hash":"h2","data":{"k":"v2"}}"#).unwrap();
+        let upd_ptr = put_data(db_ptr, json_upd.as_ptr());
+        assert!(!upd_ptr.is_null());
+        unsafe { let _ = CString::from_raw(upd_ptr as *mut i8); }
+
+        // Verify
+        let id = CString::new("p1").unwrap();
+        let get_ptr = get_by_id(db_ptr, id.as_ptr());
+        assert!(!get_ptr.is_null());
+        let get_json = unsafe { CString::from_raw(get_ptr as *mut i8) };
+        let s = get_json.to_str().unwrap();
+        assert!(s.contains("\"Ok\""));
+        assert!(s.contains("v2"));
+
+        unsafe { let _ = Box::from_raw(db_ptr); }
     }
 
     #[test]

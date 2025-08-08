@@ -32,10 +32,10 @@ const MAIN_DB_NAME: &str = "main";
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub struct AppDbState {
-    /// LMDB environment handle
-    env: Environment,
-    /// Main database handle within the environment
-    db: Database,
+    /// LMDB environment handle (None when closed)
+    env: Option<Environment>,
+    /// Main database handle within the environment (None when closed)
+    db: Option<Database>,
     /// Filesystem path to the database directory
     path: String,
 }
@@ -105,10 +105,18 @@ impl AppDbState {
         info!("Database initialized successfully");
         
         Ok(Self {
-            env,
-            db,
+            env: Some(env),
+            db: Some(db),
             path: db_dir
         })
+    }
+
+    /// Helper to get active environment and database handles.
+    /// Returns error if the database has been explicitly closed.
+    fn env_db(&self) -> Result<(&Environment, Database), LmdbError> {
+        let env = self.env.as_ref().ok_or(LmdbError::Other(1))?;
+        let db = self.db.as_ref().copied().ok_or(LmdbError::Other(1))?;
+        Ok((env, db))
     }
 
     /// Inserts a new record into the database.
@@ -152,11 +160,12 @@ impl AppDbState {
     /// - Transaction commit fails
     pub fn post(&self, model: LocalDbModel) -> Result<LocalDbModel, AppResponse> {
         let json = serde_json::to_string(&model)?;
-        
-        let mut txn = self.env.begin_rw_txn().map_err(AppResponse::from)?;
-        txn.put(self.db, &model.id, &json, WriteFlags::empty()).map_err(AppResponse::from)?;
+
+        let (env, db) = self.env_db().map_err(AppResponse::from)?;
+        let mut txn = env.begin_rw_txn().map_err(AppResponse::from)?;
+        txn.put(db, &model.id, &json, WriteFlags::empty()).map_err(AppResponse::from)?;
         txn.commit().map_err(AppResponse::from)?;
-        
+
         Ok(model)
     }
 
@@ -195,9 +204,10 @@ impl AppDbState {
     /// - The stored data is not valid UTF-8
     /// - JSON deserialization fails
     pub fn get_by_id(&self, id: &str) -> Result<Option<LocalDbModel>, LmdbError> {
-        let txn = self.env.begin_ro_txn()?;
+        let (env, db) = self.env_db()?;
+        let txn = env.begin_ro_txn()?;
         
-        match txn.get(self.db, &id) {
+        match txn.get(db, &id) {
             Ok(bytes) => {
                 let json_str = std::str::from_utf8(bytes)
                     .map_err(|_| LmdbError::Other(1))?;
@@ -248,8 +258,9 @@ impl AppDbState {
     pub fn get(&self) -> Result<Vec<LocalDbModel>, LmdbError> {
         let mut models = Vec::new();
         
-        let txn = self.env.begin_ro_txn()?;
-        let mut cursor = txn.open_ro_cursor(self.db)?;
+        let (env, db) = self.env_db()?;
+        let txn = env.begin_ro_txn()?;
+        let mut cursor = txn.open_ro_cursor(db)?;
         
         for (_, value) in cursor.iter() {
             match std::str::from_utf8(value) {
@@ -301,16 +312,17 @@ impl AppDbState {
     /// - Database operations fail
     /// - Transaction commit fails
     pub fn delete_by_id(&self, id: &str) -> Result<bool, LmdbError> {
-        let mut txn = self.env.begin_rw_txn()?;
+        let (env, db) = self.env_db()?;
+        let mut txn = env.begin_rw_txn()?;
         
-        let existed = match txn.get(self.db, &id) {
+        let existed = match txn.get(db, &id) {
             Ok(_) => true,
             Err(LmdbError::NotFound) => false,
             Err(e) => return Err(e),
         };
         
         if existed {
-            txn.del(self.db, &id, None)?;
+            txn.del(db, &id, None)?;
         }
         
         txn.commit()?;
@@ -360,9 +372,10 @@ impl AppDbState {
     /// - Database operations fail
     /// - Transaction commit fails
     pub fn put(&self, model: LocalDbModel) -> Result<Option<LocalDbModel>, LmdbError> {
-        let mut txn = self.env.begin_rw_txn()?;
+        let (env, db) = self.env_db()?;
+        let mut txn = env.begin_rw_txn()?;
         
-        let exists = match txn.get(self.db, &model.id) {
+        let exists = match txn.get(db, &model.id) {
             Ok(_) => true,
             Err(LmdbError::NotFound) => false,
             Err(e) => return Err(e),
@@ -371,7 +384,7 @@ impl AppDbState {
         if exists {
             let json = serde_json::to_string(&model)
                 .map_err(|_| LmdbError::Other(1))?;
-            txn.put(self.db, &model.id, &json, WriteFlags::empty())?;
+            txn.put(db, &model.id, &json, WriteFlags::empty())?;
             txn.commit()?;
             Ok(Some(model))
         } else {
@@ -409,18 +422,19 @@ impl AppDbState {
     /// - Delete operations fail
     /// - Transaction commit fails
     pub fn clear_all_records(&self) -> Result<usize, LmdbError> {
-        let mut txn = self.env.begin_rw_txn()?;
+        let (env, db) = self.env_db()?;
+        let mut txn = env.begin_rw_txn()?;
         let mut count = 0;
         
         let keys: Vec<Vec<u8>> = {
-            let mut cursor = txn.open_ro_cursor(self.db)?;
+            let mut cursor = txn.open_ro_cursor(db)?;
             cursor.iter()
                 .map(|(key, _)| key.to_vec())
                 .collect()
         };
         
         for key in keys {
-            match txn.del(self.db, &key, None) {
+            match txn.del(db, &key, None) {
                 Ok(_) => count += 1,
                 Err(e) => warn!("Error deleting key: {e:?}"),
             }
@@ -489,8 +503,8 @@ impl AppDbState {
             
         let new_db = new_env.create_db(Some(MAIN_DB_NAME), DatabaseFlags::empty())?;
         
-        self.env = new_env;
-        self.db = new_db;
+        self.env = Some(new_env);
+        self.db = Some(new_db);
         self.path = new_db_dir;
         
         Ok(true)
@@ -527,7 +541,15 @@ impl AppDbState {
     /// This method primarily serves as documentation and explicit lifecycle management
     /// for integration scenarios.
     pub fn close_database(&mut self) -> Result<(), LmdbError> {
-        info!("Database connection will be closed when AppDbState is dropped");
+        if let Some(env) = self.env.take() {
+            // Best-effort sync before closing
+            if let Err(e) = env.sync(true) {
+                warn!("Failed to sync LMDB env before close: {e:?}");
+            }
+            drop(env);
+        }
+        self.db = None;
+        info!("LMDB environment closed");
         Ok(())
     }
 }
