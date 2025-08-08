@@ -111,44 +111,9 @@ jobs:
             ./target/x86_64-unknown-linux-gnu/release/liboffline_first_core.a
           if-no-files-found: error
 
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        run: |
-          rustup update stable
-          rustup target add x86_64-pc-windows-msvc
-
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgDirectory: '${{ github.workspace }}/vcpkg'
-          vcpkgGitCommitId: 'master'
-
-      - name: Install LMDB
-        run: |
-          vcpkg install lmdb:x64-windows
-        shell: cmd
-
-      - name: Build for Windows x86_64
-        run: |
-          $env:VCPKG_ROOT = "${{ github.workspace }}/vcpkg"
-          cargo build --release --target x86_64-pc-windows-msvc
-        shell: powershell
-
-      - name: Upload Windows libs
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-libs
-          path: |
-            ./target/x86_64-pc-windows-msvc/release/offline_first_core.dll
-            ./target/x86_64-pc-windows-msvc/release/offline_first_core.lib
-          if-no-files-found: error
 
   publish:
-    needs: [build-apple-android, build-linux, build-windows]
+    needs: [build-apple-android, build-linux]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
@@ -172,7 +137,7 @@ jobs:
           mkdir -p ios/Frameworks
           mkdir -p macos/Frameworks
           mkdir -p linux/lib
-          mkdir -p windows/lib
+          # Windows disabled
           
           # Crear archivos README para las nuevas carpetas si no existen
           if [ ! -f "linux/README.md" ]; then
@@ -199,24 +164,7 @@ jobs:
           EOF
           fi
           
-          if [ ! -f "windows/README.md" ]; then
-            cat > windows/README.md << 'EOF'
-          # Windows Libraries
-          
-          This directory contains the compiled native libraries for Windows x86_64.
-          
-          ## Files
-          - `lib/offline_first_core.dll` - Dynamic library
-          - `lib/offline_first_core.lib` - Static library
-          
-          ## Usage
-          1. Add `offline_first_core.lib` to your project linker dependencies
-          2. Ensure `offline_first_core.dll` is in your PATH or application directory
-          
-          ## Dependencies
-          - LMDB library (install with vcpkg: `vcpkg install lmdb:x64-windows`)
-          EOF
-          fi
+          # Windows README disabled
           
           # Verificar estructura de todos los directorios de artefactos
           echo "All artifact directories structure:"
@@ -273,26 +221,12 @@ jobs:
             find ./tmp-artifacts -name "liboffline_first_core.a" -exec cp {} linux/lib/ \; || echo "No Linux .a library found"
           fi
           
-          # Mover archivos Windows
-          if [ -f "./tmp-artifacts/windows-libs/offline_first_core.dll" ]; then
-            cp ./tmp-artifacts/windows-libs/offline_first_core.dll windows/lib/
-          else
-            echo "Windows .dll library not found. Searching alternative paths..."
-            find ./tmp-artifacts -name "offline_first_core.dll" -exec cp {} windows/lib/ \; || echo "No Windows .dll library found"
-          fi
-          
-          if [ -f "./tmp-artifacts/windows-libs/offline_first_core.lib" ]; then
-            cp ./tmp-artifacts/windows-libs/offline_first_core.lib windows/lib/
-          else
-            echo "Windows .lib library not found. Searching alternative paths..."
-            find ./tmp-artifacts -name "offline_first_core.lib" -exec cp {} windows/lib/ \; || echo "No Windows .lib library found"
-          fi
+          # Windows artifacts disabled
           
           echo "Files copied to Linux:"
           find linux/lib -type f | sort
           
-          echo "Files copied to Windows:"
-          find windows/lib -type f | sort
+          # Windows listing disabled
 
       - name: Commit and push changes
         run: |
@@ -316,18 +250,14 @@ jobs:
             git add linux/lib
           fi
           
-          if [ -n "$(find windows/lib -type f 2>/dev/null)" ]; then
-            git add windows/lib
-          fi
+          # Windows lib add disabled
           
           # Agregar archivos README si fueron creados
           if [ -f "linux/README.md" ]; then
             git add linux/README.md
           fi
           
-          if [ -f "windows/README.md" ]; then
-            git add windows/README.md
-          fi
+          # Windows README add disabled
           
           git commit -m "Update native libraries from Rust build [skip ci]" || echo "No changes to commit"
           git push
