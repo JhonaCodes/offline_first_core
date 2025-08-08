@@ -9,3 +9,4 @@ compile.dart
 /compile_all_lib.sh
 /fix_macos_lib.sh
 /.claude/settings.local.json
+/invalid_db_7.lmdb/
