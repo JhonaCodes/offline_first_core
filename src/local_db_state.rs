@@ -89,8 +89,19 @@ impl AppDbState {
         
         info!("LMDB environment opened at {name}");
         
-        let db = env.create_db(Some(MAIN_DB_NAME), DatabaseFlags::empty())?;
         
+        let db = match env.open_db(Some(MAIN_DB_NAME)) {
+            Ok(data_db) => {
+                info!("Found main database");
+                data_db 
+            },
+            Err(_) => {
+                info!("Creating main database");
+                env.create_db(Some(MAIN_DB_NAME), DatabaseFlags::empty())?
+            }
+        }; 
+        
+
         info!("Database initialized successfully");
         
         Ok(Self {
@@ -128,7 +139,7 @@ impl AppDbState {
     ///     data: json!({"name": "John", "age": 30}),
     /// };
     ///
-    /// let result = db.push(model)?;
+    /// let result = db.post(model)?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
@@ -139,7 +150,7 @@ impl AppDbState {
     /// - Transaction creation fails
     /// - Database write operation fails
     /// - Transaction commit fails
-    pub fn push(&self, model: LocalDbModel) -> Result<LocalDbModel, AppResponse> {
+    pub fn post(&self, model: LocalDbModel) -> Result<LocalDbModel, AppResponse> {
         let json = serde_json::to_string(&model)?;
         
         let mut txn = self.env.begin_rw_txn().map_err(AppResponse::from)?;
@@ -334,7 +345,7 @@ impl AppDbState {
     ///     data: json!({"name": "Jane", "age": 25}),
     /// };
     ///
-    /// match db.update(updated_model)? {
+    /// match db.put(updated_model)? {
     ///     Some(model) => println!("Updated: {:?}", model),
     ///     None => println!("Record not found for update"),
     /// }
@@ -348,7 +359,7 @@ impl AppDbState {
     /// - JSON serialization fails
     /// - Database operations fail
     /// - Transaction commit fails
-    pub fn update(&self, model: LocalDbModel) -> Result<Option<LocalDbModel>, LmdbError> {
+    pub fn put(&self, model: LocalDbModel) -> Result<Option<LocalDbModel>, LmdbError> {
         let mut txn = self.env.begin_rw_txn()?;
         
         let exists = match txn.get(self.db, &model.id) {
@@ -459,6 +470,7 @@ impl AppDbState {
     /// This operation is destructive and will permanently delete all data in the current database.
     /// Ensure that any important data is backed up before calling this method.
     pub fn reset_database(&mut self, name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        self.close_database()?;
         if Path::new(&self.path).exists() {
             fs::remove_dir_all(&self.path)?;
         }

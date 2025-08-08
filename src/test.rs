@@ -357,7 +357,7 @@ pub mod tests {
         let model = create_test_model("1", None);
         match state {
             Ok(results) => {
-                let result = results.push(model.clone()).unwrap();
+                let result = results.post(model.clone()).unwrap();
 
                 assert_eq!(result.id, model.id);
                 assert_eq!(result.hash, model.hash);
@@ -400,13 +400,13 @@ pub mod tests {
 
             // Test writing to the first instance
             let model_1 = create_test_model("test1", None);
-            let result_1 = first_db.push(model_1.clone());
+            let result_1 = first_db.post(model_1.clone());
             info!("Write to first instance: {}", result_1.is_ok());
 
             // Test writing to the second instance
             let second_db = second_instance.as_ref().unwrap();
             let model_2 = create_test_model("test2", None);
-            let result_2 = second_db.push(model_2.clone());
+            let result_2 = second_db.post(model_2.clone());
             info!("Write to second instance: {}", result_2.is_ok());
 
             // Test cross-instance data visibility (if each instance can read data written by the other)
@@ -433,7 +433,7 @@ pub mod tests {
 
             // Verify that the first instance still works
             let model = create_test_model("test1", None);
-            let result = first_db.push(model);
+            let result = first_db.post(model);
             info!("First instance still functioning: {}", result.is_ok());
         }
 
@@ -455,7 +455,7 @@ pub mod tests {
 
                 // Test with existing ID
                 let model = create_test_model("1", None);
-                response.push(model.clone()).unwrap();
+                response.post(model.clone()).unwrap();
 
                 let result = response.get_by_id("1").unwrap();
                 assert!(result.is_some());
@@ -483,21 +483,21 @@ pub mod tests {
 
                 // Insert first record and verify
                 let model1 = create_test_model("1", None);
-                state.push(model1).unwrap();
+                state.post(model1).unwrap();
 
                 let results = state.get().unwrap();
                 assert_eq!(results.len(), 1, "Should have exactly 1 record");
 
                 // Insert second record and verify
                 let model2 = create_test_model("2", None);
-                state.push(model2).unwrap();
+                state.post(model2).unwrap();
 
                 let results = state.get().unwrap();
                 assert_eq!(results.len(), 2, "Should have exactly 2 records");
 
                 // Insert third record and verify
                 let model3 = create_test_model("3", None);
-                state.push(model3).unwrap();
+                state.post(model3).unwrap();
 
                 let results = state.get().unwrap();
                 assert_eq!(results.len(), 3, "Should have exactly 3 records");
@@ -518,15 +518,15 @@ pub mod tests {
             Ok(state) => {
                 // Try to update a non-existent record
                 let non_existent = create_test_model("999", None);
-                let update_result = state.update(non_existent).unwrap();
+                let update_result = state.put(non_existent).unwrap();
                 assert!(update_result.is_none());
 
                 // Update an existing record
                 let model = create_test_model("1", Some(serde_json::json!({"original": true})));
-                state.push(model).unwrap();
+                state.post(model).unwrap();
 
                 let updated_model = create_test_model("1", Some(serde_json::json!({"updated": true})));
-                let result = state.update(updated_model.clone()).unwrap();
+                let result = state.put(updated_model.clone()).unwrap();
 
                 assert!(result.is_some());
                 let updated = state.get_by_id("1").unwrap().unwrap();
@@ -547,7 +547,7 @@ pub mod tests {
 
                 // Delete an existing record
                 let model = create_test_model("1", None);
-                state.push(model).unwrap();
+                state.post(model).unwrap();
 
                 let delete_result = state.delete_by_id("1").unwrap();
                 assert!(delete_result);
@@ -570,7 +570,7 @@ pub mod tests {
 
                 // Clear DB with records
                 for i in 1..=3 {
-                    state.push(create_test_model(&i.to_string(), None)).unwrap();
+                    state.post(create_test_model(&i.to_string(), None)).unwrap();
                 }
 
                 let count = state.clear_all_records().unwrap();
@@ -590,7 +590,7 @@ pub mod tests {
             Ok(mut state) => {
                 // Add some records
                 for i in 1..=3 {
-                    state.push(create_test_model(&i.to_string(), None)).unwrap();
+                    state.post(create_test_model(&i.to_string(), None)).unwrap();
                 }
 
                 let new_name = generate_unique_db_name("hard_reset");
@@ -613,7 +613,7 @@ pub mod tests {
                 // Insert multiple records in sequence
                 for i in 1..=5 {
                     let model = create_test_model(&i.to_string(), None);
-                    let result = state.push(model).unwrap();
+                    let result = state.post(model).unwrap();
                     assert_eq!(result.id, i.to_string());
                 }
 
@@ -648,7 +648,7 @@ pub mod tests {
                     "data": vec![1, 2, 3, 4, 5]
                 }))
                     );
-                    state.push(model).unwrap();
+                    state.post(model).unwrap();
                 }
 
                 // Verify total count
@@ -686,7 +686,7 @@ pub mod tests {
             });
 
                 let model = create_test_model("complex", Some(complex_data.clone()));
-                state.push(model).unwrap();
+                state.post(model).unwrap();
 
                 // Verify that data remains intact
                 let retrieved = state.get_by_id("complex").unwrap().unwrap();
@@ -703,7 +703,7 @@ pub mod tests {
             Ok(state) => {
                 // Probar con ID vacío (LMDB no permite claves vacías)
                 let empty_id_model = create_test_model("", None);
-                match state.push(empty_id_model) {
+                match state.post(empty_id_model) {
                     Ok(_) => {
                         assert!(state.get_by_id("").unwrap().is_some());
                         info!("Empty ID stored successfully");
@@ -721,14 +721,14 @@ pub mod tests {
             });
                 let large_model = create_test_model("large", Some(large_data));
                 // Manejar el error de tamaño si ocurre
-                match state.push(large_model) {
+                match state.post(large_model) {
                     Ok(_) => info!("Large data stored successfully"),
                     Err(e) => info!("Large data too big for LMDB: {:?}", e),
                 }
 
                 // Probar actualización con datos diferentes
                 let updated_model = create_test_model("large", Some(serde_json::json!({"small": "data"})));
-                state.update(updated_model).unwrap();
+                state.put(updated_model).unwrap();
             },
             Err(_) => {
                 panic!("Error initializing database for test_edge_cases");
@@ -741,15 +741,15 @@ pub mod tests {
             Ok(state) => {
                 // 1. IDs con caracteres especiales
                 let special_id_model = create_test_model("!@#$%^&*()", None);
-                state.push(special_id_model).unwrap();
+                state.post(special_id_model).unwrap();
                 assert!(state.get_by_id("!@#$%^&*()").unwrap().is_some());
 
                 // 2. Datos nulos o vacíos
                 let null_model = create_test_model("null_data", Some(serde_json::json!(null)));
-                state.push(null_model).unwrap();
+                state.post(null_model).unwrap();
 
                 let empty_model = create_test_model("empty_data", Some(serde_json::json!({})));
-                state.push(empty_model).unwrap();
+                state.post(empty_model).unwrap();
 
                 // 3. Valores numéricos extremos
                 let extreme_values = create_test_model("extreme", Some(serde_json::json!({
@@ -758,34 +758,34 @@ pub mod tests {
             "max_f64": f64::MAX,
             "min_f64": f64::MIN
             })));
-                state.push(extreme_values).unwrap();
+                state.post(extreme_values).unwrap();
 
                 // 4. Caracteres Unicode y emojis en datos
                 let unicode_model = create_test_model("unicode", Some(serde_json::json!({
             "text": "Hello 世界 🌍 👋 🤖"
             })));
-                state.push(unicode_model).unwrap();
+                state.post(unicode_model).unwrap();
 
                 // 5. Arrays anidados profundos
                 let nested_array = create_test_model("nested", Some(serde_json::json!([
             [[[[[1,2,3]]]]]
             ])));
-                state.push(nested_array).unwrap();
+                state.post(nested_array).unwrap();
 
                 // 6. Repetitive updates of the same record
                 let repeated_model = create_test_model("repeated", None);
-                state.push(repeated_model.clone()).unwrap();
+                state.post(repeated_model.clone()).unwrap();
 
                 for i in 1..100 {
                     let updated = create_test_model("repeated", Some(serde_json::json!({
                 "update_number": i
                 })));
-                    state.update(updated).unwrap();
+                    state.put(updated).unwrap();
                 }
 
                 // 7. IDs muy largos (reducido para LMDB)
                 let long_id_model = create_test_model(&"a".repeat(250), None);  // Reducido de 1000 a 250
-                match state.push(long_id_model) {
+                match state.post(long_id_model) {
                     Ok(_) => info!("Long ID stored successfully"),
                     Err(e) => info!("Long ID too big for LMDB: {:?}", e),
                 }
@@ -793,7 +793,7 @@ pub mod tests {
                 // 8. Operaciones rápidas consecutivas
                 for i in 1..100 {
                     let quick_model = create_test_model(&format!("quick_{}", i), None);
-                    state.push(quick_model).unwrap();
+                    state.post(quick_model).unwrap();
                     state.get_by_id(&format!("quick_{}", i)).unwrap();
                     state.delete_by_id(&format!("quick_{}", i)).unwrap();
                 }
@@ -809,7 +809,7 @@ pub mod tests {
             Ok(mut state) => {
                 // 1. Crear y guardar modelo inicial
                 let test_model = create_test_model("1", Some(serde_json::json!({"test": "data"})));
-                state.push(test_model).unwrap();
+                state.post(test_model).unwrap();
 
                 // Esperar un momento para asegurar que la escritura se completó
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -826,7 +826,7 @@ pub mod tests {
 
                 // 4. Actualizar modelo
                 let updated_model = create_test_model("1", Some(serde_json::json!({"test": "updated_data"})));
-                let update_result = state.update(updated_model).unwrap();
+                let update_result = state.put(updated_model).unwrap();
                 assert!(update_result.is_some());
 
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -845,7 +845,7 @@ pub mod tests {
                 // 7. Test clear_all_records with multiple records
                 for i in 1..=3 {
                     let model = create_test_model(&i.to_string(), None);
-                    state.push(model).unwrap();
+                    state.post(model).unwrap();
                     // Verify after each insertion
                     std::thread::sleep(std::time::Duration::from_millis(50));
                     assert!(state.get_by_id(&i.to_string()).unwrap().is_some());
@@ -891,10 +891,10 @@ pub mod tests {
                 // Test operations with non-existent IDs
                 assert!(state.get_by_id("nonexistent").unwrap().is_none());
                 assert!(!state.delete_by_id("nonexistent").unwrap());
-                assert!(state.update(create_test_model("nonexistent", None)).unwrap().is_none());
+                assert!(state.put(create_test_model("nonexistent", None)).unwrap().is_none());
 
                 // Probar operaciones después de limpiar la DB
-                state.push(create_test_model("1", None)).unwrap();
+                state.post(create_test_model("1", None)).unwrap();
                 state.clear_all_records().unwrap();
                 assert!(state.get_by_id("1").unwrap().is_none());
             },
@@ -909,11 +909,11 @@ pub mod tests {
             Ok(state) => {
                 // Simular una operación que podría interrumpirse
                 let model = create_test_model("1", None);
-                state.push(model).unwrap();
+                state.post(model).unwrap();
 
                 // Try to update and delete the same record "simultaneously"
                 let updated_model = create_test_model("1", Some(serde_json::json!({"updated": true})));
-                state.update(updated_model).unwrap();
+                state.put(updated_model).unwrap();
                 state.delete_by_id("1").unwrap();
 
                 // Verify final state
@@ -930,7 +930,7 @@ pub mod tests {
             Ok(state) => {
                 // Operación exitosa
                 let model = create_test_model("1", None);
-                state.push(model).unwrap();
+                state.post(model).unwrap();
 
                 // Try operations that should fail
                 let result = state.get_by_id("nonexistent");
@@ -938,7 +938,7 @@ pub mod tests {
 
                 // Verify we can continue operating after error
                 let model2 = create_test_model("2", None);
-                assert!(state.push(model2).is_ok());
+                assert!(state.post(model2).is_ok());
             },
             Err(_) => {
                 panic!("Error initializing database for test_recovery_after_errors");
@@ -960,7 +960,7 @@ pub mod tests {
                 ];
 
                 for model in models {
-                    state.push(model).unwrap();
+                    state.post(model).unwrap();
                 }
 
                 // Verify that types are maintained
@@ -987,7 +987,7 @@ pub mod tests {
                     .collect();
 
                 for model in models {
-                    state.push(model).unwrap();
+                    state.post(model).unwrap();
                 }
 
                 // Delete multiple records
@@ -1017,7 +1017,7 @@ pub mod tests {
                 .unwrap()
                 .as_secs()
             })));
-                state.push(original).unwrap();
+                state.post(original).unwrap();
 
                 // Realizar múltiples actualizaciones
                 for i in 1..10 {
@@ -1028,7 +1028,7 @@ pub mod tests {
                     .unwrap()
                     .as_secs()
                 })));
-                    state.update(updated).unwrap();
+                    state.put(updated).unwrap();
                 }
 
                 // Verify consistency
@@ -1674,7 +1674,7 @@ pub mod tests {
                 };
                 
                 // This should work or fail gracefully
-                let _result = state.push(deep_model);
+                let _result = state.post(deep_model);
                 
                 // Test very large array
                 let large_array = serde_json::json!((0..1000).collect::<Vec<i32>>());
@@ -1684,7 +1684,7 @@ pub mod tests {
                     data: large_array,
                 };
                 
-                let _result = state.push(large_model);
+                let _result = state.post(large_model);
                 
                 // Test empty values
                 let empty_model = LocalDbModel {
@@ -1693,7 +1693,7 @@ pub mod tests {
                     data: serde_json::json!(null),
                 };
                 
-                let _result = state.push(empty_model);
+                let _result = state.post(empty_model);
             }
             Err(_) => panic!("Failed to initialize database for JSON edge case tests")
         }
@@ -1720,7 +1720,7 @@ pub mod tests {
                         data,
                     };
                     
-                    match state.push(model.clone()) {
+                    match state.post(model.clone()) {
                         Ok(_) => {
                             // Verify we can retrieve it
                             match state.get_by_id(id) {
@@ -1758,7 +1758,7 @@ pub mod tests {
                     data: serde_json::json!({"test": "data"}),
                 };
                 
-                match state.push(model) {
+                match state.post(model) {
                     Ok(_) => {
                         // Should be able to retrieve it
                         let result = state.get_by_id(&long_id);
@@ -1780,7 +1780,7 @@ pub mod tests {
                     data: large_data,
                 };
                 
-                let _result = state.push(large_model);
+                let _result = state.post(large_model);
                 // This might succeed or fail depending on LMDB configuration
                 
                 // Test extremely large value that should definitely fail
@@ -1794,7 +1794,7 @@ pub mod tests {
                 };
                 
                 // This should likely fail
-                let result = state.push(huge_model);
+                let result = state.post(huge_model);
                 if result.is_err() {
                     info!("Huge value test properly failed");
                 }
@@ -1815,7 +1815,7 @@ pub mod tests {
                     hash: "h".to_string(),
                     data: serde_json::json!({"key": "value"}),
                 };
-                assert!(state.push(single_char_model).is_ok());
+                assert!(state.post(single_char_model).is_ok());
                 
                 // Test with whitespace-only values
                 let whitespace_model = LocalDbModel {
@@ -1823,7 +1823,7 @@ pub mod tests {
                     hash: "   ".to_string(),
                     data: serde_json::json!({"spaces": "   "}),
                 };
-                assert!(state.push(whitespace_model).is_ok());
+                assert!(state.post(whitespace_model).is_ok());
                 
                 // Test with numeric string IDs
                 let numeric_model = LocalDbModel {
@@ -1831,7 +1831,7 @@ pub mod tests {
                     hash: "67890".to_string(),
                     data: serde_json::json!({"number": 42}),
                 };
-                assert!(state.push(numeric_model).is_ok());
+                assert!(state.post(numeric_model).is_ok());
                 
                 // Test with zero values
                 let zero_model = LocalDbModel {
@@ -1839,7 +1839,7 @@ pub mod tests {
                     hash: "zero_hash".to_string(),
                     data: serde_json::json!({"zero": 0, "false": false, "null": null}),
                 };
-                assert!(state.push(zero_model).is_ok());
+                assert!(state.post(zero_model).is_ok());
             }
             Err(_) => panic!("Failed to initialize database for boundary tests")
         }
@@ -1861,7 +1861,7 @@ pub mod tests {
         // Insert test data
         for i in 1..=10 {
             let model = create_test_model(&format!("concurrent_{}", i), None);
-            state.push(model).unwrap();
+            state.post(model).unwrap();
         }
         
         let mut handles = vec![];
@@ -1901,7 +1901,7 @@ pub mod tests {
         // Insert initial data
         for i in 1..=5 {
             let model = create_test_model(&format!("initial_{}", i), None);
-            state.push(model).unwrap();
+            state.post(model).unwrap();
         }
         
         let state_reader = Arc::clone(&state);
@@ -1920,7 +1920,7 @@ pub mod tests {
         let writer_handle = thread::spawn(move || {
             for i in 6..=15 {
                 let model = create_test_model(&format!("concurrent_write_{}", i), None);
-                let result = state_writer.push(model);
+                let result = state_writer.post(model);
                 assert!(result.is_ok(), "Writer failed for record {}", i);
                 thread::sleep(Duration::from_millis(15));
             }
@@ -1949,9 +1949,9 @@ pub mod tests {
             let model2 = create_test_model(&format!("db2_record_{}", i), Some(serde_json::json!({"db": 2, "id": i})));
             let model3 = create_test_model(&format!("db3_record_{}", i), Some(serde_json::json!({"db": 3, "id": i})));
             
-            assert!(db1.push(model1).is_ok());
-            assert!(db2.push(model2).is_ok());
-            assert!(db3.push(model3).is_ok());
+            assert!(db1.post(model1).is_ok());
+            assert!(db2.post(model2).is_ok());
+            assert!(db3.post(model3).is_ok());
         }
         
         // Verify data isolation
@@ -1994,7 +1994,7 @@ pub mod tests {
                         data: large_data,
                     };
                     
-                    if let Err(e) = state.push(model) {
+                    if let Err(e) = state.post(model) {
                         info!("Memory test stopped at record {} due to: {:?}", i, e);
                         break;
                     }
@@ -2040,7 +2040,7 @@ pub mod tests {
                     // Insert records
                     for i in 0..50 {
                         let model = create_test_model(&format!("cycle_{}_record_{}", cycle, i), None);
-                        let _ = state.push(model);
+                        let _ = state.post(model);
                     }
                     
                     // Read records
@@ -2052,7 +2052,7 @@ pub mod tests {
                     for i in 0..25 {
                         let mut model = create_test_model(&format!("cycle_{}_record_{}", cycle, i), None);
                         model.data = serde_json::json!({"updated": true, "cycle": cycle});
-                        let _ = state.update(model);
+                        let _ = state.put(model);
                     }
                     
                     // Delete some records
@@ -2091,7 +2091,7 @@ pub mod tests {
                     // Insert batch
                     for i in 0..10 {
                         let model = create_test_model(&format!("stress_{}_{}", cycle, i), None);
-                        if state.push(model).is_err() {
+                        if state.post(model).is_err() {
                             info!("Insert failed at cycle {} item {}", cycle, i);
                         }
                     }
@@ -2138,7 +2138,7 @@ pub mod tests {
                         "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
                     })));
                     
-                    if state.push(model).is_err() {
+                    if state.post(model).is_err() {
                         info!("Bulk insert failed at record {}", i);
                         break;
                     }
@@ -2171,7 +2171,7 @@ pub mod tests {
                 for i in (0..all_records.len()).step_by(10) { // Every 10th record
                     let mut model = create_test_model(&format!("bulk_{}", i), None);
                     model.data = serde_json::json!({"updated": true, "original_index": i});
-                    let _ = state.update(model);
+                    let _ = state.put(model);
                 }
                 let update_time = update_start.elapsed().unwrap();
                 info!("Bulk update test completed in {:?}", update_time);
@@ -2200,7 +2200,7 @@ pub mod tests {
                                 "payload": "x".repeat(100) // 100 bytes payload
                             }))
                         );
-                        let _ = state.push(model);
+                        let _ = state.post(model);
                     }
                     
                     // Measure database directory size
@@ -2260,9 +2260,9 @@ pub mod tests {
                 let upper_model = create_test_model("UPPERCASE_ID", None);
                 let mixed_model = create_test_model("MixedCase_ID", None);
                 
-                assert!(state.push(lower_model).is_ok());
-                assert!(state.push(upper_model).is_ok());
-                assert!(state.push(mixed_model).is_ok());
+                assert!(state.post(lower_model).is_ok());
+                assert!(state.post(upper_model).is_ok());
+                assert!(state.post(mixed_model).is_ok());
                 
                 // Verify case sensitivity
                 assert!(state.get_by_id("lowercase_id").unwrap().is_some());
@@ -2295,7 +2295,7 @@ pub mod tests {
             // Insert some data
             for i in 1..=5 {
                 let model = create_test_model(&format!("persistent_data_{}", i), None);
-                state.push(model).unwrap();
+                state.post(model).unwrap();
                 info!("Inserted persistent_data_{}", i);
             }
             
@@ -2348,7 +2348,7 @@ pub mod tests {
             // Add more data after restart
             for i in 6..=10 {
                 let model = create_test_model(&format!("post_restart_data_{}", i), None);
-                state.push(model).unwrap();
+                state.post(model).unwrap();
             }
             
             // Verify total count
@@ -2371,7 +2371,7 @@ pub mod tests {
             
             // Add some data to each
             let model = create_test_model(&format!("data_{}", i), None);
-            state.push(model).unwrap();
+            state.post(model).unwrap();
             
             // Verify data was inserted
             let records = state.get().unwrap();

@@ -197,7 +197,7 @@ pub extern "C" fn push_data(state: *mut AppDbState, json_ptr: *const c_char) -> 
         }
     };
     
-    match state.push(model) {
+    match state.post(model) {
         Ok(result_model) => {
             match serde_json::to_string(&result_model) {
                 Ok(json) => {
@@ -401,7 +401,7 @@ pub extern "C" fn update_data(state: *mut AppDbState, json_ptr: *const c_char) -
 
     let state = unsafe { &*state };
 
-    match state.update(model) {
+    match state.put(model) {
         Ok(Some(updated_model)) => {
             match serde_json::to_string(&updated_model) {
                 Ok(json) => {
