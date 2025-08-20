@@ -4,6 +4,7 @@
 [![Documentation](https://docs.rs/offline_first_core/badge.svg)](https://docs.rs/offline_first_core)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+
 High-performance LMDB-based local storage library optimized for FFI integration with Flutter and cross-platform applications.
 
 ## ✨ Features
