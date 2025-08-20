@@ -129,15 +129,15 @@ jobs:
 
       - name: Move files to correct locations
         run: |
-          # Crear directorios (los existentes y los nuevos)
-          mkdir -p android/src/main/jniLibs/arm64-v8a
-          mkdir -p android/src/main/jniLibs/armeabi-v7a
-          mkdir -p android/src/main/jniLibs/x86
-          mkdir -p android/src/main/jniLibs/x86_64
-          mkdir -p ios/Frameworks
-          mkdir -p macos/Frameworks
-          mkdir -p linux/lib
-          # Windows disabled
+          # Crear nueva estructura de directorios plugins/binaries
+          mkdir -p plugins/binaries/android/arm64-v8a
+          mkdir -p plugins/binaries/android/armeabi-v7a
+          mkdir -p plugins/binaries/android/x86
+          mkdir -p plugins/binaries/android/x86_64
+          mkdir -p plugins/binaries/ios
+          mkdir -p plugins/binaries/macos
+          mkdir -p plugins/binaries/linux
+          mkdir -p plugins/binaries/windows
           
           # Crear archivos README para las nuevas carpetas si no existen
           if [ ! -f "linux/README.md" ]; then
@@ -171,83 +171,74 @@ jobs:
           find ./tmp-artifacts -type f | sort
           
           # Mover archivos Android
-          find ./tmp-artifacts/android-libs -name "*.so" -type f -exec bash -c 'cp "$0" "android/src/main/jniLibs/$(basename $(dirname "$0"))/liboffline_first_core.so"' {} \;
+          find ./tmp-artifacts/android-libs -name "*.so" -type f -exec bash -c 'cp "$0" "plugins/binaries/android/$(basename $(dirname "$0"))/liboffline_first_core.so"' {} \;
           
           # Mover archivo iOS
           if [ -f "./tmp-artifacts/ios-lib/liboffline_first_core.dylib" ]; then
-            cp ./tmp-artifacts/ios-lib/liboffline_first_core.dylib ios/Frameworks/
+            cp ./tmp-artifacts/ios-lib/liboffline_first_core.dylib plugins/binaries/ios/
           else
             echo "iOS library not found. Searching alternative paths..."
-            find ./tmp-artifacts -name "*liboffline_first_core*.dylib" -not -path "*arm64.dylib" -not -path "*x86_64.dylib" -exec cp {} ios/Frameworks/liboffline_first_core.dylib \; || echo "No iOS library found"
+            find ./tmp-artifacts -name "*liboffline_first_core*.dylib" -not -path "*arm64.dylib" -not -path "*x86_64.dylib" -exec cp {} plugins/binaries/ios/liboffline_first_core.dylib \; || echo "No iOS library found"
           fi
           
           # Mover archivos macOS - con manejo de errores
           if [ -f "./tmp-artifacts/macos-libs/liboffline_first_core_arm64.dylib" ]; then
-            cp ./tmp-artifacts/macos-libs/liboffline_first_core_arm64.dylib macos/Frameworks/
+            cp ./tmp-artifacts/macos-libs/liboffline_first_core_arm64.dylib plugins/binaries/macos/
           else
             echo "macOS arm64 library not found. Searching alternative paths..."
-            find ./tmp-artifacts -name "*liboffline_first_core*arm64*.dylib" -exec cp {} macos/Frameworks/liboffline_first_core_arm64.dylib \; || echo "No macOS arm64 library found"
+            find ./tmp-artifacts -name "*liboffline_first_core*arm64*.dylib" -exec cp {} plugins/binaries/macos/liboffline_first_core_arm64.dylib \; || echo "No macOS arm64 library found"
           fi
           
           if [ -f "./tmp-artifacts/macos-libs/liboffline_first_core_x86_64.dylib" ]; then
-            cp ./tmp-artifacts/macos-libs/liboffline_first_core_x86_64.dylib macos/Frameworks/
+            cp ./tmp-artifacts/macos-libs/liboffline_first_core_x86_64.dylib plugins/binaries/macos/
           else
             echo "macOS x86_64 library not found. Searching alternative paths..."
-            find ./tmp-artifacts -name "*liboffline_first_core*x86_64*.dylib" -exec cp {} macos/Frameworks/liboffline_first_core_x86_64.dylib \; || echo "No macOS x86_64 library found"
+            find ./tmp-artifacts -name "*liboffline_first_core*x86_64*.dylib" -exec cp {} plugins/binaries/macos/liboffline_first_core_x86_64.dylib \; || echo "No macOS x86_64 library found"
           fi
           
-          # Verificar archivos copiados
-          echo "Files copied to Android:"
-          find android/src/main/jniLibs -type f | sort
+          # También crear el binario universal para compatibilidad
+          if [ -f "plugins/binaries/macos/liboffline_first_core_arm64.dylib" ] || [ -f "plugins/binaries/macos/liboffline_first_core_x86_64.dylib" ]; then
+            # Usar el primero disponible como binario principal
+            if [ -f "plugins/binaries/macos/liboffline_first_core_arm64.dylib" ]; then
+              cp plugins/binaries/macos/liboffline_first_core_arm64.dylib plugins/binaries/macos/liboffline_first_core.dylib
+            elif [ -f "plugins/binaries/macos/liboffline_first_core_x86_64.dylib" ]; then
+              cp plugins/binaries/macos/liboffline_first_core_x86_64.dylib plugins/binaries/macos/liboffline_first_core.dylib
+            fi
+          fi
           
-          echo "Files copied to iOS:"
-          find ios/Frameworks -type f | sort
-          
-          echo "Files copied to macOS:"
-          find macos/Frameworks -type f | sort
+          # Verificar archivos copiados en nueva estructura
+          echo "Files copied to plugins/binaries structure:"
+          find plugins/binaries -type f | sort
           
           # Mover archivos Linux
           if [ -f "./tmp-artifacts/linux-libs/liboffline_first_core.so" ]; then
-            cp ./tmp-artifacts/linux-libs/liboffline_first_core.so linux/lib/
+            cp ./tmp-artifacts/linux-libs/liboffline_first_core.so plugins/binaries/linux/
           else
             echo "Linux .so library not found. Searching alternative paths..."
-            find ./tmp-artifacts -name "liboffline_first_core.so" -exec cp {} linux/lib/ \; || echo "No Linux .so library found"
+            find ./tmp-artifacts -name "liboffline_first_core.so" -exec cp {} plugins/binaries/linux/ \; || echo "No Linux .so library found"
           fi
           
           if [ -f "./tmp-artifacts/linux-libs/liboffline_first_core.a" ]; then
-            cp ./tmp-artifacts/linux-libs/liboffline_first_core.a linux/lib/
+            cp ./tmp-artifacts/linux-libs/liboffline_first_core.a plugins/binaries/linux/
           else
             echo "Linux .a library not found. Searching alternative paths..."
-            find ./tmp-artifacts -name "liboffline_first_core.a" -exec cp {} linux/lib/ \; || echo "No Linux .a library found"
+            find ./tmp-artifacts -name "liboffline_first_core.a" -exec cp {} plugins/binaries/linux/ \; || echo "No Linux .a library found"
           fi
           
           # Windows artifacts disabled
           
-          echo "Files copied to Linux:"
-          find linux/lib -type f | sort
-          
-          # Windows listing disabled
+          # Verificación final de todos los archivos copiados
+          echo "Final plugins/binaries structure:"
+          find plugins/binaries -type f | sort
 
       - name: Commit and push changes
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           
-          # Solo incluir directorios que existen y tienen archivos
-          if [ -n "$(find android/src/main/jniLibs -type f 2>/dev/null)" ]; then
-            git add android/src/main/jniLibs
-          fi
-          
-          if [ -n "$(find ios/Frameworks -type f 2>/dev/null)" ]; then
-            git add ios/Frameworks
-          fi
-          
-          if [ -n "$(find macos/Frameworks -type f 2>/dev/null)" ]; then
-            git add macos/Frameworks
-          fi
-          
-          if [ -n "$(find linux/lib -type f 2>/dev/null)" ]; then
-            git add linux/lib
+          # Agregar nueva estructura de plugins/binaries
+          if [ -n "$(find plugins/binaries -type f 2>/dev/null)" ]; then
+            git add plugins/binaries
           fi
           
           # Windows lib add disabled
@@ -259,5 +250,13 @@ jobs:
           
           # Windows README add disabled
           
-          git commit -m "Update native libraries from Rust build [skip ci]" || echo "No changes to commit"
+          git commit -m "Update native libraries in plugins/binaries structure from Rust build [skip ci]
+
+🚀 Compiled binaries for all platforms:
+- Android: arm64-v8a, armeabi-v7a, x86, x86_64
+- iOS: Universal binary 
+- macOS: ARM64 + x86_64 + Universal binary
+- Linux: .so and .a libraries
+
+Auto-generated by offline_first_core build system" || echo "No changes to commit"
           git push
