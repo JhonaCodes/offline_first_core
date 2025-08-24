@@ -33,16 +33,12 @@ jobs:
       - name: Build for Android
         run: |
           export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653
-          # Crear estructura de directorios que coincida con flutter_local_db
-          mkdir -p ./android-libs/arm64-v8a
-          mkdir -p ./android-libs/armeabi-v7a
-          mkdir -p ./android-libs/x86
-          mkdir -p ./android-libs/x86_64
-          # Compilar cada arquitectura individualmente
-          cargo ndk -t arm64-v8a -o ./android-libs/arm64-v8a build --release
-          cargo ndk -t armeabi-v7a -o ./android-libs/armeabi-v7a build --release
-          cargo ndk -t x86 -o ./android-libs/x86 build --release
-          cargo ndk -t x86_64 -o ./android-libs/x86_64 build --release
+          # Compilar todas las arquitecturas Android con cargo-ndk
+          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86 -t x86_64 -o ./android-libs build --release
+          
+          # Verificar que se generaron los archivos
+          echo "Generated Android libraries:"
+          find ./android-libs -name "*.so" -type f | sort
 
       - name: Build for iOS
         run: |
@@ -142,23 +138,26 @@ jobs:
           echo "All artifact directories structure:"
           find ./tmp-artifacts -type f | sort
           
-          # Mover archivos Android con estructura correcta
+          # Mover archivos Android - cargo-ndk genera estructura por arquitectura
           if [ -d "./tmp-artifacts/android-libs" ]; then
-            # Copiar cada arquitectura desde la estructura generada por cargo-ndk
-            if [ -f "./tmp-artifacts/android-libs/arm64-v8a/liboffline_first_core.so" ]; then
-              cp ./tmp-artifacts/android-libs/arm64-v8a/liboffline_first_core.so plugins/binaries/android/arm64-v8a/
-            fi
-            if [ -f "./tmp-artifacts/android-libs/armeabi-v7a/liboffline_first_core.so" ]; then
-              cp ./tmp-artifacts/android-libs/armeabi-v7a/liboffline_first_core.so plugins/binaries/android/armeabi-v7a/
-            fi
-            if [ -f "./tmp-artifacts/android-libs/x86/liboffline_first_core.so" ]; then
-              cp ./tmp-artifacts/android-libs/x86/liboffline_first_core.so plugins/binaries/android/x86/
-            fi
-            if [ -f "./tmp-artifacts/android-libs/x86_64/liboffline_first_core.so" ]; then
-              cp ./tmp-artifacts/android-libs/x86_64/liboffline_first_core.so plugins/binaries/android/x86_64/
-            fi
+            echo "Searching for Android libraries..."
+            find ./tmp-artifacts/android-libs -name "*.so" -type f
+            
+            # Copiar cada arquitectura según la estructura generada por cargo-ndk
+            for arch in arm64-v8a armeabi-v7a x86 x86_64; do
+              if [ -f "./tmp-artifacts/android-libs/${arch}/liboffline_first_core.so" ]; then
+                echo "Copying ${arch} library"
+                cp "./tmp-artifacts/android-libs/${arch}/liboffline_first_core.so" "plugins/binaries/android/${arch}/"
+              else
+                echo "Warning: ${arch} library not found in expected location"
+                # Buscar en cualquier subdirectorio
+                find ./tmp-artifacts/android-libs -name "liboffline_first_core.so" -path "*${arch}*" -exec cp {} "plugins/binaries/android/${arch}/" \; || true
+              fi
+            done
           else
             echo "Android artifacts directory not found"
+            echo "Available artifact directories:"
+            ls -la ./tmp-artifacts/ || true
           fi
           
           # Mover archivo iOS
