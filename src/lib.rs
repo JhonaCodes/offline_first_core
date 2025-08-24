@@ -114,8 +114,11 @@ pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
         }
     };
 
-    let db_path = format!("./{name_str}");
+    // Use a more appropriate directory path for cross-platform compatibility
+    let db_path = format!("{name_str}");
     let lmdb_dir = format!("{db_path}.lmdb");
+
+    info!("Attempting to create/open database at: {}", lmdb_dir);
 
     if Path::new(&lmdb_dir).exists() {
         info!("Database already exists; attempting clean close before reopen");
@@ -132,15 +135,23 @@ pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
             }
         }
     } else {
-        info!("Creating new database");
+        info!("Creating new database at: {}", lmdb_dir);
     }
 
     let state = AppDbState::init(db_path);
-    info!("Database initialized");
     
     match state {
-        Ok(response) => Box::into_raw(Box::new(response)),
-        Err(_) => std::ptr::null_mut(),
+        Ok(response) => {
+            info!("✅ Database initialized successfully");
+            Box::into_raw(Box::new(response))
+        },
+        Err(e) => {
+            warn!("❌ Failed to initialize database: {:?}", e);
+            warn!("LMDB error details: {}", e);
+            warn!("Attempted path: {}", lmdb_dir);
+            warn!("Current working directory might not be writable");
+            std::ptr::null_mut()
+        },
     }
 }
 

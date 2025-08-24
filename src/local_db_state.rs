@@ -78,31 +78,56 @@ impl AppDbState {
         let db_dir = format!("{name}.lmdb");
         let path = Path::new(&db_dir);
         
+        info!("Initializing database at: {}", db_dir);
+        
         if !path.exists() {
-            fs::create_dir_all(path).map_err(|_| LmdbError::Other(2))?;
+            info!("Database directory doesn't exist, creating: {}", db_dir);
+            fs::create_dir_all(path).map_err(|e| {
+                warn!("Failed to create directory {}: {}", db_dir, e);
+                warn!("This might be a permissions issue");
+                LmdbError::Other(2)
+            })?;
+            info!("✅ Directory created successfully: {}", db_dir);
+        } else {
+            info!("Database directory already exists: {}", db_dir);
         }
         
+        info!("Opening LMDB environment...");
         let env = Environment::new()
             .set_max_dbs(10)
             .set_map_size(1024 * 1024 * 1024) // 1GB
-            .open(path)?;
+            .open(path)
+            .map_err(|e| {
+                warn!("❌ Failed to open LMDB environment at {}: {:?}", db_dir, e);
+                warn!("This could be due to:");
+                warn!("1. Directory permissions");
+                warn!("2. Insufficient storage space"); 
+                warn!("3. LMDB lock file issues");
+                warn!("4. Android security restrictions");
+                e
+            })?;
         
-        info!("LMDB environment opened at {name}");
+        info!("✅ LMDB environment opened at {}", name);
         
-        
+        info!("Opening/creating main database...");
         let db = match env.open_db(Some(MAIN_DB_NAME)) {
             Ok(data_db) => {
-                info!("Found main database");
+                info!("✅ Found existing main database");
                 data_db 
             },
-            Err(_) => {
-                info!("Creating main database");
-                env.create_db(Some(MAIN_DB_NAME), DatabaseFlags::empty())?
+            Err(e) => {
+                info!("Main database not found, creating new one...");
+                env.create_db(Some(MAIN_DB_NAME), DatabaseFlags::empty())
+                    .map_err(|create_err| {
+                        warn!("❌ Failed to create main database: {:?}", create_err);
+                        warn!("Original open error: {:?}", e);
+                        create_err
+                    })?
             }
         }; 
         
 
-        info!("Database initialized successfully");
+        info!("✅ Database initialized successfully at {}", db_dir);
         
         Ok(Self {
             env: Some(env),
