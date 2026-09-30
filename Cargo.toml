@@ -1,7 +1,7 @@
 [package]
 name = "offline_first_core"
 repository = "https://github.com/JhonaCodes/offline_first_core"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 license = "MIT"
 description = "Diesel-style embedded database on LMDB 1.0 (natdb): tables, secondary indexes, transactions and a C ABI for Flutter"
@@ -46,5 +46,5 @@ log = "0.4.28"
 thiserror = "2.0.21"
 # LMDB 1.0.2 bindings. natdb-sys provides the cursor operation codes and
 # defines MDB_USE_POSIX_SEM on Apple targets (required by the App Sandbox).
-natdb = "0.1.0"
-natdb-sys = "0.1.0"
+natdb = "0.1.1"
+natdb-sys = "0.1.1"

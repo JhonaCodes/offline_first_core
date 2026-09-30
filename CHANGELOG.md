@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-10-01
+
+### Fixed
+- Opening a database failed with `Operation not permitted` inside the iOS and
+  macOS App Sandbox: natdb 0.1.1 locks with process-shared pthread mutexes
+  instead of named POSIX semaphores, which the sandbox rejects.
+
 ## [0.6.0] - 2026-10-01
 
 A Diesel-style query engine over LMDB 1.0.2, and the fixes needed to ship it.
