@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-10-01
+
+### Changed
+- Range scans visit only the keys inside their bounds: `gt` and `lt` skip the
+  keys of the bound itself, and a one-sided range stops at the end of the kind
+  of value it compares with (a numeric range no longer walks the strings).
+- A plan whose keys satisfy the whole filter is *exact*: its rows are not
+  checked again, and `count` reads no row at all. `explain` reports it as
+  `"exact"`. With 10 000 rows, an indexed `count` went from 2.9 ms to 32 µs and
+  the indexed query of the benchmark from 221 µs to 39 µs.
+
+### Fixed
+- `-0.0` equals `0` in filters, as it already did in index keys.
+
 ## [0.6.1] - 2026-10-01
 
 ### Fixed

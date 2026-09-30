@@ -130,6 +130,15 @@ fn main() -> Result<(), EngineError> {
         Ok(())
     })?;
 
+    measure("indexed count (city = x)", 200, || {
+        for i in 0..200u64 {
+            Query::table("users")
+                .filter(col("city").eq(CITIES[(i % 4) as usize]))
+                .count(&db)?;
+        }
+        Ok(())
+    })?;
+
     measure("full scan filter (not indexed)", 10, || {
         for _ in 0..10 {
             Query::table("users")

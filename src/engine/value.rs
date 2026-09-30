@@ -36,7 +36,7 @@ pub(crate) fn kind_rank(value: &Value) -> u8 {
 }
 
 /// Compares two JSON numbers exactly when both are integers, by `f64`
-/// otherwise.
+/// otherwise. `-0.0` equals `0`, as in SQL and in the key encoding.
 pub(crate) fn number_cmp(a: &serde_json::Number, b: &serde_json::Number) -> Ordering {
     if let (Some(x), Some(y)) = (a.as_i64(), b.as_i64()) {
         return x.cmp(&y);
@@ -46,7 +46,8 @@ pub(crate) fn number_cmp(a: &serde_json::Number, b: &serde_json::Number) -> Orde
     }
     let x = a.as_f64().unwrap_or(0.0);
     let y = b.as_f64().unwrap_or(0.0);
-    x.total_cmp(&y)
+    // JSON numbers are finite, so the comparison always has an answer.
+    x.partial_cmp(&y).unwrap_or(Ordering::Equal)
 }
 
 /// SQL comparison: `None` when the values are not comparable.

@@ -60,7 +60,9 @@ db.transaction(|tx| {
 
 Rows are JSON objects (`serde_json::Value`, or any `Deserialize` type with
 `load::<T>`). A table declares its primary key field and its indexes; `find`
-looks rows up by primary key, and `explain` shows which index a query uses.
+looks rows up by primary key, and `explain` shows which index a query uses and
+whether the index alone satisfies the filter (`"exact"`: rows are not checked
+again, and `count` reads no row).
 Without `order`, the order of the rows is unspecified, as in SQL.
 
 ## Flutter / C ABI
@@ -104,20 +106,22 @@ Linux and Windows).
 ## Benchmarks
 
 `cargo run --release --example bench -- 10000` — median of 5 runs, durable
-commits, Apple M1 Max, macOS 26.7, 10 000 rows with two indexes:
+commits, Apple M1 Max, macOS 26.7, 10 000 rows with two indexes (0.6.2):
 
 | Operation | Per op |
 |---|---|
-| Insert, batch of 10 000 in one transaction | 6.4 µs |
-| Insert, one transaction per row | 8.9 ms (one `F_FULLFSYNC` per commit) |
-| Find by primary key | 1.4 µs |
-| Indexed query (`city = x AND age > y`, limit 50) | 202 µs |
-| Top 20 through an index (`order(age.desc())`) | 26 µs |
+| Insert, batch of 10 000 in one transaction | 6.5 µs |
+| Insert, one transaction per row | 9.1–10.2 ms (one `F_FULLFSYNC` per commit) |
+| Find by primary key | 1.5 µs |
+| Indexed query (`city = x AND age > y`, limit 50) | 38 µs |
+| Top 20 through an index (`order(age.desc())`) | 15 µs |
+| Indexed count (`city = x`, 2 500 matches) | 31 µs |
 | Full scan with an unindexed filter (10 000 rows) | 5.4 ms |
-| Update one row by key (own transaction) | 9.0 ms |
+| Update one row by key (own transaction) | 9.9–10.4 ms |
 
 Durable single-row commits cost one full flush on Apple hardware; group writes
-in a transaction or a batch to amortize it.
+in a transaction or a batch to amortize it, or open with a relaxed
+`Durability`.
 
 ## Building the native libraries
 
