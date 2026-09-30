@@ -28,11 +28,13 @@ pub(crate) fn decode_row(table: &str, bytes: &[u8]) -> EngineResult<Value> {
 }
 
 /// Visits the `(primary key, row bytes)` pairs selected by `plan`, until
-/// `visit` returns `false`.
+/// `visit` returns `false`. Without `fetch`, an index scan passes empty row
+/// bytes instead of reading each row.
 fn scan<T: Transaction>(
     txn: &T,
     table: &Table,
     plan: &Plan,
+    fetch: bool,
     mut visit: impl FnMut(&[u8], &[u8]) -> EngineResult<bool>,
 ) -> EngineResult<()> {
     match &plan.access {
@@ -67,28 +69,27 @@ fn scan<T: Transaction>(
                 lower.as_deref(),
                 upper.as_deref(),
                 plan.desc,
-                |_, pk| match txn.get(table.db, &pk) {
-                    Ok(row) => visit(pk, row),
-                    // An index entry always has its row; tolerate nothing else.
-                    Err(natdb::Error::NotFound) => Err(EngineError::CorruptRecord {
-                        table: table.def.name.clone(),
-                        detail: format!("index `{}` points to a missing row", index.def.name),
-                    }),
-                    Err(e) => Err(e.into()),
+                |_, pk| {
+                    if !fetch {
+                        return visit(pk, &[]);
+                    }
+                    match txn.get(table.db, &pk) {
+                        Ok(row) => visit(pk, row),
+                        // An index entry always has its row; tolerate nothing else.
+                        Err(natdb::Error::NotFound) => Err(EngineError::CorruptRecord {
+                            table: table.def.name.clone(),
+                            detail: format!("index `{}` points to a missing row", index.def.name),
+                        }),
+                        Err(e) => Err(e.into()),
+                    }
                 },
             )
         }
     }
 }
 
-/// Whether `key` is past an upper bound: its leading bytes compare greater.
-fn beyond(key: &[u8], upper: &[u8]) -> bool {
-    let n = upper.len().min(key.len());
-    key[..n] > upper[..n]
-}
-
-/// Walks the keys of `db` that start with `prefix` and lie within the bounds,
-/// ascending or descending.
+/// Walks the keys of `db` that start with `prefix`, from `lower` (inclusive)
+/// to `upper` (exclusive), ascending or descending.
 fn walk<T: Transaction>(
     txn: &T,
     db: natdb::Database,
@@ -123,7 +124,7 @@ fn walk<T: Transaction>(
             seek(start)?
         };
         while let Some((key, value)) = entry {
-            if !key.starts_with(prefix) || upper.is_some_and(|u| beyond(key, u)) {
+            if !key.starts_with(prefix) || upper.is_some_and(|upper| key >= upper) {
                 break;
             }
             if !visit(key, value)? {
@@ -134,20 +135,22 @@ fn walk<T: Transaction>(
         return Ok(());
     }
 
-    // Descending: position after the last candidate, then step back.
-    let end = upper.map_or_else(|| prefix.to_vec(), <[u8]>::to_vec);
-    let mut entry = match prefix_successor(&end) {
-        Some(after) => match seek(&after)? {
+    // Descending: position on the last key before the end, then step back.
+    let end = upper
+        .map(<[u8]>::to_vec)
+        .or_else(|| prefix_successor(prefix));
+    let mut entry = match end {
+        Some(end) => match seek(&end)? {
             Some(_) => step(MDB_PREV)?,
             None => step(MDB_LAST)?,
         },
         None => step(MDB_LAST)?,
     };
     while let Some((key, value)) = entry {
-        if !key.starts_with(prefix) || lower.is_some_and(|l| key < l) {
+        if !key.starts_with(prefix) || lower.is_some_and(|lower| key < lower) {
             break;
         }
-        if !upper.is_some_and(|u| beyond(key, u)) && !visit(key, value)? {
+        if !visit(key, value)? {
             break;
         }
         entry = step(MDB_PREV)?;
@@ -166,9 +169,9 @@ fn collect<T: Transaction>(
     limit: Option<usize>,
 ) -> EngineResult<Matched> {
     let mut rows = Vec::new();
-    scan(txn, table, plan, |key, bytes| {
+    scan(txn, table, plan, true, |key, bytes| {
         let row = decode_row(&table.def.name, bytes)?;
-        if filter.is_none_or(|f| f.matches(&row)) {
+        if plan.exact || filter.is_none_or(|f| f.matches(&row)) {
             rows.push((key.to_vec(), bytes.to_vec(), row));
         }
         Ok(limit.is_none_or(|limit| rows.len() < limit))
@@ -209,6 +212,19 @@ fn select<T: Transaction>(store: &Store, txn: &T, query: &Select) -> EngineResul
     } else {
         None
     };
+    if plan.exact && plan.ordered {
+        // Neither the filter nor the order needs the decoded rows.
+        let mut rows = Vec::new();
+        scan(txn, &table, &plan, true, |_, bytes| {
+            rows.push(bytes.to_vec());
+            Ok(early.is_none_or(|early| rows.len() < early))
+        })?;
+        return Ok(rows
+            .into_iter()
+            .skip(offset)
+            .take(limit.unwrap_or(usize::MAX))
+            .collect());
+    }
     let mut rows = collect(txn, &table, &plan, query.filter.as_ref(), early)?;
     if !plan.ordered {
         sort_rows(&mut rows, &query.order);
@@ -239,11 +255,13 @@ fn count<T: Transaction>(
     }
     let plan = plan::choose(&table, filter, &[]);
     let mut total = 0u64;
-    scan(txn, &table, &plan, |_, bytes| {
-        let row = decode_row(&table.def.name, bytes)?;
-        if filter.is_none_or(|f| f.matches(&row)) {
-            total += 1;
-        }
+    // An exact plan counts keys without reading rows.
+    scan(txn, &table, &plan, !plan.exact, |_, bytes| {
+        let matched = match filter {
+            Some(filter) if !plan.exact => filter.matches(&decode_row(&table.def.name, bytes)?),
+            _ => true,
+        };
+        total += u64::from(matched);
         Ok(true)
     })?;
     Ok(total)
