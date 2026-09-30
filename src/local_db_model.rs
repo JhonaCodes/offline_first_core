@@ -121,7 +121,7 @@ use serde_json::Value as JsonValue;
 /// # Database Integration
 ///
 /// This model is designed to work seamlessly with the database operations
-/// provided by [`AppDbState`]:
+/// provided by [`AppDbState`](crate::local_db_state::AppDbState):
 ///
 /// ```no_run
 /// use offline_first_core::{local_db_state::AppDbState, local_db_model::LocalDbModel};

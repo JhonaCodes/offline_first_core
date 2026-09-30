@@ -1,31 +1,50 @@
 [package]
 name = "offline_first_core"
 repository = "https://github.com/JhonaCodes/offline_first_core"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "MIT"
-description = "High-performance LMDB-based local storage library optimized for FFI integration with Flutter and cross-platform applications"
+description = "Diesel-style embedded database on LMDB 1.0 (natdb): tables, secondary indexes, transactions and a C ABI for Flutter"
 readme = "README.MD"
-keywords = ["lmdb", "ffi", "flutter", "database", "offline"]
-categories = ["database", "embedded", "wasm", "api-bindings"]
+keywords = ["lmdb", "database", "flutter", "offline-first", "diesel"]
+categories = ["database", "database-implementations", "api-bindings"]
+rust-version = "1.85"
+documentation = "https://docs.rs/offline_first_core"
+exclude = ["/.github", "/.idea", "/scripts", "/dist"]
 authors = ["JhonaCodes"]
 
 [lib]
 name = "offline_first_core"
-crate-type = ["staticlib", "cdylib"]
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 [profile.release]
-opt-level = 'z'
+# Measured with `cargo run --release --example bench` (Apple M-series, 10k rows):
+# opt-level 3 reads 35-70% faster than 'z' for a 20% larger library.
+opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
-panic = 'abort'
+# Unwinding is required to contain panics at the C ABI (`std::panic::catch_unwind`
+# in every entry point): with `abort`, any panic kills the host app.
+panic = "unwind"
 
 [features]
 static = []
+# Test only, never enable it in a shipped build: exports
+# `ofc_fault_injection_arm`, which makes the next entry point called on the same
+# thread panic inside its guard. `tests/panic_boundary.rs` needs it.
+fault-injection = []
+
+[[test]]
+name = "panic_boundary"
+required-features = ["fault-injection"]
 
 [dependencies]
-lmdb = "0.8"
-serde = { version = "1.0.217", features = ["derive"] }
-serde_json = "1.0.140"
-log = "0.4.27"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+log = "0.4.28"
+thiserror = "2.0.21"
+# LMDB 1.0.2 bindings. natdb-sys provides the cursor operation codes and
+# defines MDB_USE_POSIX_SEM on Apple targets (required by the App Sandbox).
+natdb = "0.1.0"
+natdb-sys = "0.1.0"

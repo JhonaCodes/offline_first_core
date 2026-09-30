@@ -1,521 +1,246 @@
-//! Database state management and operations.
+//! The legacy key-value API (`push`, `get_by_id`, ...) of 0.5.0.
 //!
-//! This module provides the core database functionality using LMDB (Lightning Memory-Mapped Database)
-//! as the storage engine. It handles all database operations including initialization, CRUD operations,
-//! and connection management.
+//! Records are [`LocalDbModel`]s stored as JSON in the database `main` of the
+//! environment, keyed by their id — the layout of 0.5.0. The same environment
+//! also holds the tables of the query [`engine`](crate::engine), so an
+//! application can move from this API to the engine without reopening
+//! anything.
+//!
+//! Semantics kept from 0.5.0 on purpose (RFC-001 §20.2): `push` replaces an
+//! existing record with the same id (upsert), `update` only writes existing
+//! records.
 
-use crate::local_db_model::LocalDbModel;
-use log::{info, warn};
-use lmdb::{Environment, Database, Transaction, WriteFlags, Cursor, DatabaseFlags, Error as LmdbError};
 use std::fs;
+use std::io;
 use std::path::Path;
-use crate::app_response::AppResponse;
+use std::str::{self, Utf8Error};
 
-/// The default database name within the LMDB environment.
-const MAIN_DB_NAME: &str = "main";
+use log::{info, warn};
+use natdb::{Cursor, Transaction, WriteFlags};
+use thiserror::Error;
 
-/// Database state container that manages the LMDB environment and database connections.
-///
-/// This struct encapsulates the LMDB environment and database handle, providing
-/// a safe interface for database operations. It maintains the database path for
-/// operations like reset that require filesystem manipulation.
-///
-/// # Examples
+use crate::engine::{EngineError, OpenOptions, Store};
+use crate::local_db_model::LocalDbModel;
+
+/// Errors of the legacy API.
+#[derive(Debug, Error)]
+pub enum DbError {
+    /// A file system operation failed.
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+    /// LMDB reported an error.
+    #[error("storage error: {0}")]
+    Storage(#[from] natdb::Error),
+    /// Opening the storage failed (for example [`EngineError::LegacyFormat`]
+    /// or [`EngineError::AlreadyOpen`]).
+    #[error(transparent)]
+    Engine(#[from] EngineError),
+    /// A record could not be serialized.
+    #[error("failed to serialize record: {0}")]
+    Serialization(#[source] serde_json::Error),
+    /// A stored record is not UTF-8.
+    #[error("stored record `{id}` is not valid UTF-8: {source}")]
+    Utf8 {
+        /// Record id.
+        id: String,
+        /// Decoding error.
+        source: Utf8Error,
+    },
+    /// A stored record is not a valid [`LocalDbModel`].
+    #[error("stored record `{id}` is not a valid record: {source}")]
+    Deserialization {
+        /// Record id.
+        id: String,
+        /// Decoding error.
+        source: serde_json::Error,
+    },
+    /// The database was closed, for example by a failed reset.
+    #[error("database is closed")]
+    Closed,
+}
+
+impl DbError {
+    /// Whether the operation failed only because the memory map is full.
+    pub fn is_map_full(&self) -> bool {
+        matches!(
+            self,
+            Self::Storage(natdb::Error::MapFull) | Self::Engine(EngineError::MapFull)
+        )
+    }
+}
+
+/// Directory of the database `name`: `<name>.lmdb`.
+pub(crate) fn db_dir_name(name: &str) -> String {
+    format!("{name}.lmdb")
+}
+
+fn decode_record(id: &str, bytes: &[u8]) -> Result<LocalDbModel, DbError> {
+    let json = str::from_utf8(bytes).map_err(|source| DbError::Utf8 {
+        id: id.to_string(),
+        source,
+    })?;
+    serde_json::from_str(json).map_err(|source| DbError::Deserialization {
+        id: id.to_string(),
+        source,
+    })
+}
+
+/// A database opened through the legacy API.
 ///
 /// ```no_run
-/// use offline_first_core::local_db_state::AppDbState;
+/// use offline_first_core::local_db_model::LocalDbModel;
+/// use offline_first_core::local_db_state::{AppDbState, DbError};
+/// use serde_json::json;
 ///
-/// // Initialize a new database
-/// let db_state = AppDbState::init("my_database".to_string())?;
-///
-/// // The database is ready for operations
-/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// let db = AppDbState::init("/absolute/path/app".to_string())?;
+/// db.push(LocalDbModel { id: "user-1".into(), hash: "h1".into(), data: json!({"name": "Ada"}) })?;
+/// assert!(db.get_by_id("user-1")?.is_some());
+/// # Ok::<(), DbError>(())
 /// ```
 pub struct AppDbState {
-    /// LMDB environment handle
-    env: Environment,
-    /// Main database handle within the environment
-    db: Database,
-    /// Filesystem path to the database directory
+    store: Option<Store>,
     path: String,
 }
 
 impl AppDbState {
-    /// Initializes a new database instance or opens an existing one.
+    /// Opens (or creates) the database stored in `<name>.lmdb`, with default
+    /// options.
     ///
-    /// This function creates an LMDB environment with the specified name, setting up
-    /// a directory-based storage system. The database is configured with a 1GB memory
-    /// map size and support for up to 10 named databases.
-    ///
-    /// # Parameters
-    ///
-    /// * `name` - The base name for the database. A `.lmdb` extension will be added
-    ///   to create the directory name.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(AppDbState)` on success, or `Err(LmdbError)` if initialization fails.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use offline_first_core::local_db_state::AppDbState;
-    ///
-    /// // Create or open a database named "user_data"
-    /// let db = AppDbState::init("user_data".to_string())?;
-    ///
-    /// // The database directory will be "./user_data.lmdb"
-    /// # Ok::<(), lmdb::Error>(())
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - The database directory cannot be created
-    /// - LMDB environment initialization fails
-    /// - The main database cannot be created within the environment
-    pub fn init(name: String) -> Result<Self, LmdbError> {
-        let db_dir = format!("{name}.lmdb");
-        let path = Path::new(&db_dir);
-        
-        if !path.exists() {
-            fs::create_dir_all(path).map_err(|_| LmdbError::Other(2))?;
-        }
-        
-        let env = Environment::new()
-            .set_max_dbs(10)
-            .set_map_size(1024 * 1024 * 1024) // 1GB
-            .open(path)?;
-        
-        info!("LMDB environment opened at {name}");
-        
-        let db = env.create_db(Some(MAIN_DB_NAME), DatabaseFlags::empty())?;
-        
-        info!("Database initialized successfully");
-        
+    /// Fails with [`EngineError::LegacyFormat`] (wrapped in
+    /// [`DbError::Engine`]) for a database written by 0.5.0 or older, whose
+    /// LMDB 0.9 format LMDB 1.0 cannot read, and with
+    /// [`EngineError::AlreadyOpen`] if the directory is already open in this
+    /// process.
+    pub fn init(name: String) -> Result<Self, DbError> {
+        Self::open_dir(&db_dir_name(&name), &OpenOptions::default())
+    }
+
+    /// Opens (or creates) the database stored in the directory `dir`.
+    pub(crate) fn open_dir(dir: &str, options: &OpenOptions) -> Result<Self, DbError> {
+        let store = Store::open(Path::new(dir), options)?;
+        info!("Database initialized at {dir}");
         Ok(Self {
-            env,
-            db,
-            path: db_dir
+            store: Some(store),
+            path: dir.to_string(),
         })
     }
 
-    /// Inserts a new record into the database.
-    ///
-    /// This method serializes the provided model to JSON and stores it using the model's
-    /// ID as the key. The operation is performed within a write transaction to ensure
-    /// data consistency.
-    ///
-    /// # Parameters
-    ///
-    /// * `model` - The data model to insert into the database
-    ///
-    /// # Returns
-    ///
-    /// Returns the inserted model on success, or an error response if the operation fails.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use offline_first_core::{local_db_state::AppDbState, local_db_model::LocalDbModel};
-    /// use serde_json::json;
-    ///
-    /// let db = AppDbState::init("test_db".to_string())?;
-    ///
-    /// let model = LocalDbModel {
-    ///     id: "user_123".to_string(),
-    ///     hash: "abc123".to_string(),
-    ///     data: json!({"name": "John", "age": 30}),
-    /// };
-    ///
-    /// let result = db.push(model)?;
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - JSON serialization fails
-    /// - Transaction creation fails
-    /// - Database write operation fails
-    /// - Transaction commit fails
-    pub fn push(&self, model: LocalDbModel) -> Result<LocalDbModel, AppResponse> {
-        let json = serde_json::to_string(&model)?;
-        
-        let mut txn = self.env.begin_rw_txn().map_err(AppResponse::from)?;
-        txn.put(self.db, &model.id, &json, WriteFlags::empty()).map_err(AppResponse::from)?;
-        txn.commit().map_err(AppResponse::from)?;
-        
+    /// The storage of this database, shared with the query engine.
+    pub(crate) fn store(&self) -> Result<&Store, EngineError> {
+        self.store.as_ref().ok_or(EngineError::Closed)
+    }
+
+    fn legacy_store(&self) -> Result<&Store, DbError> {
+        self.store.as_ref().ok_or(DbError::Closed)
+    }
+
+    /// Stores `model` under its id, replacing any record with the same id.
+    pub fn push(&self, model: LocalDbModel) -> Result<LocalDbModel, DbError> {
+        let store = self.legacy_store()?;
+        let json = serde_json::to_vec(&model).map_err(DbError::Serialization)?;
+        let mut txn = store.env().begin_rw_txn()?;
+        txn.put(store.legacy_db(), &model.id, &json, WriteFlags::empty())?;
+        txn.commit()?;
         Ok(model)
     }
 
-    /// Retrieves a record from the database by its ID.
-    ///
-    /// This method performs a read-only lookup using the provided ID as the key.
-    /// If found, the JSON data is deserialized back into a `LocalDbModel`.
-    ///
-    /// # Parameters
-    ///
-    /// * `id` - The unique identifier of the record to retrieve
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(Some(LocalDbModel))` if the record is found, `Ok(None)` if not found,
-    /// or `Err(LmdbError)` if the operation fails.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use offline_first_core::local_db_state::AppDbState;
-    ///
-    /// let db = AppDbState::init("test_db".to_string())?;
-    ///
-    /// match db.get_by_id("user_123")? {
-    ///     Some(model) => println!("Found user: {:?}", model),
-    ///     None => println!("User not found"),
-    /// }
-    /// # Ok::<(), lmdb::Error>(())
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - Transaction creation fails
-    /// - The stored data is not valid UTF-8
-    /// - JSON deserialization fails
-    pub fn get_by_id(&self, id: &str) -> Result<Option<LocalDbModel>, LmdbError> {
-        let txn = self.env.begin_ro_txn()?;
-        
-        match txn.get(self.db, &id) {
-            Ok(bytes) => {
-                let json_str = std::str::from_utf8(bytes)
-                    .map_err(|_| LmdbError::Other(1))?;
-                let model = serde_json::from_str(json_str)
-                    .map_err(|_| LmdbError::Other(1))?;
-                Ok(Some(model))
-            }
-            Err(LmdbError::NotFound) => {
+    /// The record `id`, if any.
+    pub fn get_by_id(&self, id: &str) -> Result<Option<LocalDbModel>, DbError> {
+        let store = self.legacy_store()?;
+        let txn = store.env().begin_ro_txn()?;
+        match txn.get(store.legacy_db(), &id) {
+            Ok(bytes) => decode_record(id, bytes).map(Some),
+            Err(natdb::Error::NotFound) => {
                 info!("No value found for id {id}");
                 Ok(None)
             }
-            Err(e) => Err(e)
+            Err(error) => Err(error.into()),
         }
     }
 
-    /// Retrieves all records from the database.
-    ///
-    /// This method iterates through all key-value pairs in the database,
-    /// deserializing each JSON value back into a `LocalDbModel`. Records that
-    /// fail to deserialize are logged and skipped.
-    ///
-    /// # Returns
-    ///
-    /// Returns a vector containing all successfully deserialized records,
-    /// or an error if the database operation fails.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use offline_first_core::local_db_state::AppDbState;
-    ///
-    /// let db = AppDbState::init("test_db".to_string())?;
-    ///
-    /// let all_records = db.get()?;
-    /// println!("Found {} records", all_records.len());
-    ///
-    /// for record in all_records {
-    ///     println!("Record ID: {}", record.id);
-    /// }
-    /// # Ok::<(), lmdb::Error>(())
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - Transaction creation fails
-    /// - Cursor creation fails
-    pub fn get(&self) -> Result<Vec<LocalDbModel>, LmdbError> {
+    /// All records, in id order. Records that cannot be decoded are skipped
+    /// with a warning, as in 0.5.0.
+    pub fn get(&self) -> Result<Vec<LocalDbModel>, DbError> {
+        let store = self.legacy_store()?;
+        let txn = store.env().begin_ro_txn()?;
+        let mut cursor = txn.open_ro_cursor(store.legacy_db())?;
         let mut models = Vec::new();
-        
-        let txn = self.env.begin_ro_txn()?;
-        let mut cursor = txn.open_ro_cursor(self.db)?;
-        
-        for (_, value) in cursor.iter() {
-            match std::str::from_utf8(value) {
-                Ok(json_str) => {
-                    match serde_json::from_str::<LocalDbModel>(json_str) {
-                        Ok(model) => models.push(model),
-                        Err(e) => info!("Error deserializing model: {e:?}"),
-                    }
-                }
-                Err(e) => info!("Error converting to UTF-8: {e:?}"),
+        for entry in cursor.iter_start() {
+            let (key, value) = entry?;
+            match decode_record(&String::from_utf8_lossy(key), value) {
+                Ok(model) => models.push(model),
+                Err(error) => warn!("Skipping undecodable record: {error}"),
             }
         }
-        
         Ok(models)
     }
 
-    /// Deletes a record from the database by its ID.
-    ///
-    /// This method first checks if the record exists, then removes it if found.
-    /// The operation is performed within a write transaction for consistency.
-    ///
-    /// # Parameters
-    ///
-    /// * `id` - The unique identifier of the record to delete
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if a record was deleted, `false` if no record with the given ID exists,
-    /// or an error if the operation fails.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use offline_first_core::local_db_state::AppDbState;
-    ///
-    /// let db = AppDbState::init("test_db".to_string())?;
-    ///
-    /// match db.delete_by_id("user_123")? {
-    ///     true => println!("Record deleted successfully"),
-    ///     false => println!("Record not found"),
-    /// }
-    /// # Ok::<(), lmdb::Error>(())
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - Transaction creation fails
-    /// - Database operations fail
-    /// - Transaction commit fails
-    pub fn delete_by_id(&self, id: &str) -> Result<bool, LmdbError> {
-        let mut txn = self.env.begin_rw_txn()?;
-        
-        let existed = match txn.get(self.db, &id) {
-            Ok(_) => true,
-            Err(LmdbError::NotFound) => false,
-            Err(e) => return Err(e),
+    /// Deletes the record `id`. Returns whether it existed.
+    pub fn delete_by_id(&self, id: &str) -> Result<bool, DbError> {
+        let store = self.legacy_store()?;
+        let mut txn = store.env().begin_rw_txn()?;
+        let existed = match txn.del(store.legacy_db(), &id, None) {
+            Ok(()) => true,
+            Err(natdb::Error::NotFound) => false,
+            Err(error) => return Err(error.into()),
         };
-        
-        if existed {
-            txn.del(self.db, &id, None)?;
-        }
-        
         txn.commit()?;
         Ok(existed)
     }
 
-    /// Updates an existing record in the database.
-    ///
-    /// This method first verifies that a record with the given ID exists, then
-    /// updates it with the new data. If no record exists, the operation returns `None`.
-    ///
-    /// # Parameters
-    ///
-    /// * `model` - The updated model data. The ID field determines which record to update.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Some(LocalDbModel)` with the updated data if successful, `None` if no
-    /// record with the given ID exists, or an error if the operation fails.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use offline_first_core::{local_db_state::AppDbState, local_db_model::LocalDbModel};
-    /// use serde_json::json;
-    ///
-    /// let db = AppDbState::init("test_db".to_string())?;
-    ///
-    /// let updated_model = LocalDbModel {
-    ///     id: "user_123".to_string(),
-    ///     hash: "new_hash".to_string(),
-    ///     data: json!({"name": "Jane", "age": 25}),
-    /// };
-    ///
-    /// match db.update(updated_model)? {
-    ///     Some(model) => println!("Updated: {:?}", model),
-    ///     None => println!("Record not found for update"),
-    /// }
-    /// # Ok::<(), lmdb::Error>(())
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - Transaction creation fails
-    /// - JSON serialization fails
-    /// - Database operations fail
-    /// - Transaction commit fails
-    pub fn update(&self, model: LocalDbModel) -> Result<Option<LocalDbModel>, LmdbError> {
-        let mut txn = self.env.begin_rw_txn()?;
-        
-        let exists = match txn.get(self.db, &model.id) {
-            Ok(_) => true,
-            Err(LmdbError::NotFound) => false,
-            Err(e) => return Err(e),
-        };
-        
-        if exists {
-            let json = serde_json::to_string(&model)
-                .map_err(|_| LmdbError::Other(1))?;
-            txn.put(self.db, &model.id, &json, WriteFlags::empty())?;
-            txn.commit()?;
-            Ok(Some(model))
-        } else {
-            Ok(None)
+    /// Replaces the record `model.id` if it exists. Returns `None` (and writes
+    /// nothing) when it does not.
+    pub fn update(&self, model: LocalDbModel) -> Result<Option<LocalDbModel>, DbError> {
+        let store = self.legacy_store()?;
+        let mut txn = store.env().begin_rw_txn()?;
+        match txn.get(store.legacy_db(), &model.id) {
+            Ok(_) => {}
+            Err(natdb::Error::NotFound) => return Ok(None),
+            Err(error) => return Err(error.into()),
         }
+        let json = serde_json::to_vec(&model).map_err(DbError::Serialization)?;
+        txn.put(store.legacy_db(), &model.id, &json, WriteFlags::empty())?;
+        txn.commit()?;
+        Ok(Some(model))
     }
 
-    /// Removes all records from the database while preserving the database structure.
-    ///
-    /// This method iterates through all records and deletes them individually.
-    /// The database remains operational after this operation and can continue
-    /// to accept new records.
-    ///
-    /// # Returns
-    ///
-    /// Returns the number of records that were deleted, or an error if the operation fails.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use offline_first_core::local_db_state::AppDbState;
-    ///
-    /// let db = AppDbState::init("test_db".to_string())?;
-    ///
-    /// let deleted_count = db.clear_all_records()?;
-    /// println!("Deleted {} records", deleted_count);
-    /// # Ok::<(), lmdb::Error>(())
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - Transaction creation fails
-    /// - Cursor operations fail
-    /// - Delete operations fail
-    /// - Transaction commit fails
-    pub fn clear_all_records(&self) -> Result<usize, LmdbError> {
-        let mut txn = self.env.begin_rw_txn()?;
-        let mut count = 0;
-        
-        let keys: Vec<Vec<u8>> = {
-            let mut cursor = txn.open_ro_cursor(self.db)?;
-            cursor.iter()
-                .map(|(key, _)| key.to_vec())
-                .collect()
-        };
-        
-        for key in keys {
-            match txn.del(self.db, &key, None) {
-                Ok(_) => count += 1,
-                Err(e) => warn!("Error deleting key: {e:?}"),
-            }
-        }
+    /// Deletes every legacy record in one transaction. Returns how many there
+    /// were. Tables of the query engine are not touched.
+    pub fn clear_all_records(&self) -> Result<usize, DbError> {
+        let store = self.legacy_store()?;
+        let mut txn = store.env().begin_rw_txn()?;
+        let count = txn.stat(store.legacy_db())?.entries();
+        txn.clear_db(store.legacy_db())?;
         txn.commit()?;
         Ok(count)
     }
 
-    /// Completely resets the database to a clean state with a new name.
+    /// Deletes this database (records and tables) and opens an empty one at
+    /// `<name>.lmdb`.
     ///
-    /// This operation performs the following steps:
-    /// 1. Closes the current database environment
-    /// 2. Removes the existing database directory and all its contents
-    /// 3. Creates a new database environment with the specified name
-    /// 4. Updates the internal state to use the new database
+    /// Steps: close the environment, remove its directory, open the new one.
+    /// If a step fails the database stays closed: every later operation,
+    /// including another reset, returns [`DbError::Closed`] instead of touching
+    /// files it no longer owns.
     ///
-    /// # Parameters
-    ///
-    /// * `name` - The new name for the database
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(true)` on success, or an error if any step fails.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use offline_first_core::local_db_state::AppDbState;
-    ///
-    /// let mut db = AppDbState::init("old_db".to_string())?;
-    ///
-    /// // Reset to a new database
-    /// db.reset_database("new_db")?;
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - The existing database directory cannot be removed
-    /// - The new database directory cannot be created
-    /// - LMDB environment initialization fails
-    /// - Database creation within the environment fails
-    ///
-    /// # Safety
-    ///
-    /// This operation is destructive and will permanently delete all data in the current database.
-    /// Ensure that any important data is backed up before calling this method.
-    pub fn reset_database(&mut self, name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    /// This operation is destructive.
+    pub fn reset_database(&mut self, name: &str) -> Result<bool, DbError> {
+        // A closed database no longer owns `self.path`: after a failed reset
+        // another database may already live there, so it must not be removed.
+        let store = self.store.take().ok_or(DbError::Closed)?;
+        drop(store);
         if Path::new(&self.path).exists() {
             fs::remove_dir_all(&self.path)?;
         }
-        
-        let new_db_dir = format!("{name}.lmdb");
-        let path = Path::new(&new_db_dir);
-        
-        if !path.exists() {
-            fs::create_dir_all(path)?;
-        }
-        
-        let new_env = Environment::new()
-            .set_max_dbs(10)
-            .set_map_size(1024 * 1024 * 1024)
-            .open(path)?;
-            
-        let new_db = new_env.create_db(Some(MAIN_DB_NAME), DatabaseFlags::empty())?;
-        
-        self.env = new_env;
-        self.db = new_db;
-        self.path = new_db_dir;
-        
+        let new_dir = db_dir_name(name);
+        self.store = Some(Store::open(Path::new(&new_dir), &OpenOptions::default())?);
+        self.path = new_dir;
         Ok(true)
     }
-    
-    /// Provides explicit database connection management.
-    ///
-    /// This method serves as an explicit indicator that database resources should be
-    /// cleaned up. While LMDB automatically closes connections when the environment
-    /// is dropped, this function provides a clear signal for connection lifecycle
-    /// management, particularly useful in FFI scenarios like Flutter hot restart.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` on success. This operation cannot fail as it only provides
-    /// a signal for cleanup rather than performing actual resource deallocation.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use offline_first_core::local_db_state::AppDbState;
-    ///
-    /// let mut db = AppDbState::init("test_db".to_string())?;
-    ///
-    /// // Before hot restart or application shutdown
-    /// db.close_database()?;
-    /// # Ok::<(), lmdb::Error>(())
-    /// ```
-    ///
-    /// # Notes
-    ///
-    /// In LMDB, database connections are automatically managed through RAII.
-    /// The actual cleanup occurs when the `AppDbState` instance is dropped.
-    /// This method primarily serves as documentation and explicit lifecycle management
-    /// for integration scenarios.
-    pub fn close_database(&mut self) -> Result<(), LmdbError> {
-        info!("Database connection will be closed when AppDbState is dropped");
+
+    /// Kept for compatibility: resources are released when the value is
+    /// dropped (the C API releases them in `close_database`).
+    pub fn close_database(&mut self) -> Result<(), DbError> {
         Ok(())
     }
 }

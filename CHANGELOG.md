@@ -5,6 +5,99 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-10-01
+
+A Diesel-style query engine over LMDB 1.0.2, and the fixes needed to ship it.
+
+### Breaking
+- Storage moved to **LMDB 1.0.2** through [natdb](https://crates.io/crates/natdb).
+  LMDB 1.0 cannot read files written by LMDB 0.9 (0.5.x): opening one fails
+  with `LegacyFormat` (`ofc_open`, `AppDbState::init`) or returns null
+  (`create_db`), and the data file is left untouched. Migrate with
+  flutter_local_db 1.6 (`exportAll`) and 2.0 (import).
+- All nine legacy entry points are `unsafe extern "C" fn`: they dereference raw
+  pointers. C and Dart callers are unaffected (`unsafe` is not part of the
+  symbol); Rust callers now need an `unsafe` block.
+- `create_db` uses the path exactly as given (`./` was prepended, which placed
+  absolute paths under the working directory on Linux desktop and Windows).
+
+### Added
+- `engine`: tables of JSON rows with a primary key and secondary indexes
+  (single, composite, unique, maintained in the same transaction), a
+  rule-based planner (`explain`), and Diesel-style Rust builders (`Query`,
+  `col`, `filter`, `order`, `limit`, `insert_into`, `update().set()`,
+  `delete`, `on_conflict`, aggregates).
+- Transactions: `Db::transaction` (commit on `Ok`, rollback on `Err`),
+  savepoints, read snapshots, atomic batches; a failed write makes its
+  transaction rollback-only; statement writes are atomic.
+- C ABI `ofc_open` (reports open errors) and `ofc_execute`, a versioned JSON
+  wire protocol (statements, batches, interactive transactions on an owner
+  thread with an idle timeout, savepoints, `explain`, `info`).
+- The memory map starts at 64 MiB and doubles when full, up to `max_map_size`.
+- `OpenOptions::durability`: `full` (default), `no_meta_sync`, `no_sync`.
+- `examples/bench.rs`, `scripts/build-binaries.sh` and a release workflow that
+  attaches the libraries of every platform (including Windows x64/arm64 and
+  Linux x64/arm64) to each GitHub release.
+
+### Changed
+- Release profile: `opt-level = 3` (reads 35–70% faster than `z` in
+  `examples/bench.rs`, for a 20% larger library).
+- Opening one directory twice in a process with the Rust API fails with
+  `AlreadyOpen` (LMDB forbids it); FFI handles share one environment.
+
+### Removed
+- The committed `jniLibs/` binaries of 0.5.0, `ndk_guide.md` and the workflow
+  that pushed binaries into the Flutter repository.
+
+### Also in this release (C ABI hardening)
+- `ofc_free_string(ptr)`: releases the strings returned by the library. Every
+  response string must be released with it, exactly once (not with the C
+  `free`). Before, no function could release them, so every call leaked its
+  response (`get_all` leaked a copy of the whole database).
+- New exported symbols use the `ofc_` prefix: on iOS the library is linked
+  statically into the app, where exported names share the process namespace.
+
+#### Changed
+- Release builds use `panic = "unwind"`, and every entry point contains
+  panics: an internal panic is logged and answered with
+  `{"DatabaseError": "internal panic in <function>: <message>"}` (`create_db`
+  returns null) instead of aborting the app. The release library grows by
+  16,800 bytes (aarch64-apple-darwin dylib, 470,912 → 487,712 bytes).
+- `create_db` on a path that is already open in the process returns a new
+  handle to the same database, as in 0.5.0 (with heed it returned null). This
+  covers several Dart isolates and a Flutter hot restart that loses its
+  pointer without closing it. The database closes with its last handle.
+- `reset_database` resets the database shared by every handle opened on the
+  same path; all of them keep working on the new database. If the target path
+  is open by another database of the process, it fails with a `DatabaseError`
+  ("already open") and changes nothing.
+- The `BadRequest` messages for null pointers passed to `push_data` now name
+  the function, like the other entry points (`Null state pointer passed to
+  push_data`).
+
+#### Fixed
+- `close_database` did not release anything: the handle and the LMDB
+  environment stayed alive, so the same path could not be reopened in the
+  process. It now releases the handle; **the pointer is invalid after the
+  call**, and closing it twice is undefined behavior, like a double `free`.
+- **Breaking on Linux desktop**: `create_db` turned the name into `./<name>`,
+  so an absolute path resolved against the working directory
+  (`$CWD/<absolute path>.lmdb`). The path is now used exactly as given, as
+  `reset_database` already did. iOS, Android and macOS apps run with `/` as
+  working directory, so their location does not change. On Linux desktop the
+  effective location changes: databases created by earlier versions stay under
+  `$CWD/<absolute path>.lmdb` and must be moved to `<absolute path>.lmdb` to be
+  found. On Windows (`./C:\...`) absolute paths did not work before.
+- `delete_by_id`, `reset_database` and `close_database` created a mutable
+  reference to state that other calls (other isolates) could be using at the
+  same time, which is undefined behavior. Entry points now only share the
+  handle, and a reset excludes other operations through a lock.
+
+#### Testing
+- Cargo feature `fault-injection` (test only, never enable it in a shipped
+  build) exports `ofc_fault_injection_arm` to test the panic containment:
+  `cargo test --features fault-injection --test panic_boundary`.
+
 ### v0.5.0 - 2025-01-14
 - Update documentation
 
