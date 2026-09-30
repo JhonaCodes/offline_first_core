@@ -50,9 +50,9 @@ checksum = "32a282da65faaf38286cf3be983213fcf1d2e2a58700e808f83f4ea9a4804bc0"
 
 [[package]]
 name = "natdb"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ef68b9001abbb656fcbb87373892f1cc3b4367ddbb823806a3f42c82f002298"
+checksum = "f8db3dd7d9c55eb001981214eda55988ea2f523cde51cc0c81fd87a8f755d23e"
 dependencies = [
  "bitflags",
  "libc",
@@ -61,9 +61,9 @@ dependencies = [
 
 [[package]]
 name = "natdb-sys"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52c9ba88d032cb827c330c447507716e762e1ca278f70a3c2bb3e7c6240a2a2c"
+checksum = "9766860187e0ea0b1321257b97f4fedd21ff9e33706dc661e70119760485c552"
 dependencies = [
  "cc",
  "libc",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "offline_first_core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "log",
  "natdb",
