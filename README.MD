@@ -1,429 +1,132 @@
-# 🗃️ Offline First Core
+# offline_first_core
 
-[![Crates.io](https://img.shields.io/crates/v/offline_first_core.svg)](https://crates.io/crates/offline_first_core)
-[![Documentation](https://docs.rs/offline_first_core/badge.svg)](https://docs.rs/offline_first_core)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+A Diesel-style embedded database for Rust and Flutter, built on
+**LMDB 1.0.2** through [natdb](https://github.com/JhonaCodes/natdb).
 
-High-performance LMDB-based local storage library optimized for FFI integration with Flutter and cross-platform applications.
+- **Diesel-style queries** — `filter`, `or_filter`, `order`, `then_order_by`,
+  `limit`, `offset`, `find`, `first`, `count`, aggregates, `insert_into`,
+  `update(..).set(..)`, `delete`, `on_conflict`, with Diesel's operator names
+  (`eq`, `ne`, `gt`, `ge`, `lt`, `le`, `eq_any`, `ne_all`, `is_null`,
+  `between`, `like`, …).
+- **One executor for Rust and Dart** — the Rust builders and the Dart SDK
+  ([flutter_local_db](https://pub.dev/packages/flutter_local_db)) produce the
+  same intermediate representation; filtering, sorting and index lookups
+  always run in Rust.
+- **Secondary indexes** (single, composite, unique) maintained in the same
+  transaction as their rows, and a rule-based planner with `explain`.
+- **Transactions** — Diesel-style `transaction` (commit on `Ok`, rollback on
+  `Err`), savepoints, read snapshots, atomic batches; a failed write makes its
+  transaction rollback-only.
+- **Durable by default**, crash-safe (copy-on-write B+tree, no recovery step),
+  with a memory map that grows on demand.
+- Runs on Android, iOS (device and simulator), macOS, Linux and Windows.
 
-## ✨ Features
-
-- 🚀 **LMDB-powered** - Battle-tested database engine used by Bitcoin Core and OpenLDAP
-- 📱 **Flutter-ready** - Hot restart compatible FFI interface
-- ⚡ **High performance** - Zero-copy reads and ACID transactions
-- 🔄 **Cross-platform** - Works on iOS, Android, Windows, macOS, and Linux
-- 📦 **Simple API** - Only 9 functions to learn
-
-## 🚀 Quick Start
-
-### Flutter Integration
-
-```dart
-import 'dart:ffi';
-import 'dart:convert';
-
-// 1. Load the native library
-final dylib = DynamicLibrary.open('liboffline_first_core.so');
-
-// 2. Define FFI functions
-typedef CreateDbNative = Pointer Function(Pointer<Utf8>);
-typedef CreateDb = Pointer Function(Pointer<Utf8>);
-final createDb = dylib.lookupFunction<CreateDbNative, CreateDb>('create_db');
-
-// 3. Use the database
-final dbPointer = createDb("my_app_database".toNativeUtf8());
-
-final jsonData = jsonEncode({
-  "id": "user_123",
-  "hash": "content_hash",
-  "data": {"name": "John Doe", "email": "john@example.com"}
-});
-
-final result = pushData(dbPointer, jsonData.toNativeUtf8());
-```
-
-### Rust Direct Usage
-
-```rust
-use offline_first_core::{AppDbState, LocalDbModel};
-use serde_json::json;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize database
-    let db = AppDbState::init("my_database".to_string())?;
-
-    // Create and store data
-    let user = LocalDbModel {
-        id: "user_123".to_string(),
-        hash: "content_hash".to_string(),
-        data: json!({"name": "John Doe", "email": "john@example.com"}),
-    };
-
-    db.push(user)?;
-
-    // Retrieve data
-    let user = db.get_by_id("user_123")?.unwrap();
-    println!("User: {}", user.data["name"]);
-
-    Ok(())
-}
-```
-
-## 📚 API Reference
-
-### Core Functions
-
-| Function | Rust | FFI | Description |
-|----------|------|-----|-------------|
-| **Initialize** | `AppDbState::init(name)` | `create_db(name)` | Create or open database |
-| **Insert** | `db.push(model)` | `push_data(db, json)` | Add new record |
-| **Get by ID** | `db.get_by_id(id)` | `get_by_id(db, id)` | Retrieve specific record |
-| **Get All** | `db.get()` | `get_all(db)` | Retrieve all records |
-| **Update** | `db.update(model)` | `update_data(db, json)` | Update existing record |
-| **Delete** | `db.delete_by_id(id)` | `delete_by_id(db, id)` | Remove record |
-| **Clear** | `db.clear_all_records()` | `clear_all_records(db)` | Remove all records |
-| **Reset** | `db.reset_database(name)` | `reset_database(db, name)` | Reset database |
-| **Close** | `db.close_database()` | `close_database(db)` | Close connection |
-
-### Data Model
-
-```rust
-pub struct LocalDbModel {
-    pub id: String,      // Unique identifier (cannot be empty)
-    pub hash: String,    // Content hash for versioning
-    pub data: JsonValue, // Your JSON data
-}
-```
-
-## 🎯 Usage Examples
-
-### 1. User Preferences
-
-```rust
-use offline_first_core::{AppDbState, LocalDbModel};
-use serde_json::json;
-
-fn save_preferences() -> Result<(), Box<dyn std::error::Error>> {
-    let db = AppDbState::init("user_settings".to_string())?;
-    
-    let preferences = LocalDbModel {
-        id: "app_preferences".to_string(),
-        hash: "v1.0".to_string(),
-        data: json!({
-            "theme": "dark",
-            "language": "en",
-            "notifications": true
-        }),
-    };
-    
-    db.push(preferences)?;
-    Ok(())
-}
-```
-
-### 2. Shopping Cart
-
-```rust
-fn add_to_cart(product_id: &str, quantity: i32) -> Result<(), Box<dyn std::error::Error>> {
-    let db = AppDbState::init("shopping_cart".to_string())?;
-    
-    let item = LocalDbModel {
-        id: product_id.to_string(),
-        hash: format!("cart_{}", chrono::Utc::now().timestamp()),
-        data: json!({
-            "product_id": product_id,
-            "quantity": quantity,
-            "price": 29.99
-        }),
-    };
-    
-    db.push(item)?;
-    Ok(())
-}
-```
-
-### 3. Offline Cache
-
-```rust
-fn cache_article(article_id: &str, content: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let db = AppDbState::init("article_cache".to_string())?;
-    
-    let article = LocalDbModel {
-        id: article_id.to_string(),
-        hash: format!("article_{}", md5::compute(content)),
-        data: json!({
-            "title": "Article Title",
-            "content": content,
-            "cached_at": chrono::Utc::now().to_rfc3339()
-        }),
-    };
-    
-    db.push(article)?;
-    Ok(())
-}
-```
-
-## 🔧 Advanced Usage
-
-### Error Handling
-
-```rust
-use offline_first_core::{AppDbState, AppResponse};
-
-match db.push(model) {
-    Ok(_) => println!("✅ Success"),
-    Err(AppResponse::DatabaseError(msg)) => eprintln!("💾 Database error: {}", msg),
-    Err(AppResponse::SerializationError(msg)) => eprintln!("📝 JSON error: {}", msg),
-    Err(AppResponse::NotFound(msg)) => eprintln!("🔍 Not found: {}", msg),
-    Err(other) => eprintln!("🔥 Other error: {}", other),
-}
-```
-
-### Batch Operations
-
-```rust
-fn bulk_insert(records: Vec<LocalDbModel>) -> Result<usize, Box<dyn std::error::Error>> {
-    let db = AppDbState::init("bulk_data".to_string())?;
-    let mut success_count = 0;
-    
-    for model in records {
-        if db.push(model).is_ok() {
-            success_count += 1;
-        }
-    }
-    
-    Ok(success_count)
-}
-```
-
-### Hot Restart (Flutter)
-
-```dart
-class DatabaseManager {
-  static Pointer? _dbPointer;
-  
-  static void initDatabase() {
-    _dbPointer = createDb("my_app_db".toNativeUtf8());
-  }
-  
-  static void closeDatabase() {
-    if (_dbPointer != null) {
-      closeDatabase(_dbPointer!);
-      _dbPointer = null;
-    }
-  }
-}
-```
-
-## 🛠️ Setup
-
-### Installation
-
-Add to your `Cargo.toml`:
+## Rust
 
 ```toml
 [dependencies]
-offline_first_core = "0.3.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+offline_first_core = "0.6"
+serde_json = "1"
 ```
-
-For FFI projects:
-
-```toml
-[lib]
-name = "my_storage_lib"
-crate-type = ["staticlib", "cdylib"]
-```
-
-### Building
-
-```bash
-# Debug build
-cargo build
-
-# Release build
-cargo build --release
-
-# Cross-platform builds
-cargo build --target aarch64-apple-ios --release        # iOS
-cargo build --target aarch64-linux-android --release    # Android
-cargo build --target x86_64-pc-windows-msvc --release   # Windows
-```
-
-## ⚠️ Important Notes
-
-### LMDB Limitations
 
 ```rust
-// ❌ Empty IDs not supported
-let invalid = LocalDbModel {
-    id: "".to_string(), // Will fail!
-    // ...
-};
+use offline_first_core::engine::{col, Db, Query, TableDef};
+use serde_json::{json, Value};
 
-// ✅ Always use non-empty IDs
-let valid = LocalDbModel {
-    id: "user_123".to_string(), // Good!
-    // ...
-};
+let db = Db::open("/path/to/app.lmdb")?;
+db.define_table(
+    TableDef::new("skills", "id")
+        .index("by_language_priority", &["language", "priority"])
+        .unique_index("by_slug", &["slug"]),
+)?;
+
+Query::insert_into("skills", [json!({"id": "rust-review", "slug": "rr", "language": "rust", "priority": 3})])
+    .execute(&db)?;
+
+let top: Vec<Value> = Query::table("skills")
+    .filter(col("language").eq("rust"))
+    .filter(col("priority").ge(2))
+    .order(col("priority").desc())
+    .limit(20)
+    .load(&db)?;
+
+db.transaction(|tx| {
+    Query::update("skills").filter(col("id").eq("rust-review")).set("priority", 5).execute_in(tx)?;
+    // A savepoint: its failure only rolls back its own writes.
+    let _ = tx.savepoint(|sp| Query::insert_into("skills", [json!({"id": "rust-review"})]).execute_in(sp));
+    Ok(())
+})?;
 ```
 
-### Memory Safety (FFI)
+Rows are JSON objects (`serde_json::Value`, or any `Deserialize` type with
+`load::<T>`). A table declares its primary key field and its indexes; `find`
+looks rows up by primary key, and `explain` shows which index a query uses.
+Without `order`, the order of the rows is unspecified, as in SQL.
 
-```c
-// ✅ Always check null pointers
-void* db = create_db("my_db");
-if (db == NULL) {
-    // Handle error
-    return;
-}
+## Flutter / C ABI
 
-// ✅ Free returned strings
-const char* result = get_by_id(db, "user_1");
-if (result != NULL) {
-    // Use result...
-    free((void*)result); // Important!
-}
-```
+The Dart SDK [flutter_local_db](https://pub.dev/packages/flutter_local_db)
+bundles this library for every platform. Its C ABI:
 
-### Performance Tips
+| Symbol | Purpose |
+|---|---|
+| `ofc_open(path, options, *out)` | Opens `<path>.lmdb`; reports errors such as `LegacyFormat` |
+| `ofc_execute(handle, request)` | Runs one request of the JSON [wire protocol](src/wire.rs) (statements, batches, interactive transactions, savepoints, `explain`) |
+| `ofc_free_string(ptr)` | Releases every string returned by the library |
+| `close_database(handle)` | Releases a handle; the database closes with its last handle |
+| `create_db`, `push_data`, `get_by_id`, `get_all`, `update_data`, `delete_by_id`, `clear_all_records`, `reset_database` | The 0.5 key-value API, unchanged |
 
-```rust
-// ✅ DO: Reuse connections
-let db = AppDbState::init("my_db".to_string())?;
-for i in 0..1000 {
-    db.push(create_model(i))?; // Efficient
-}
+Every entry point catches panics (`panic = "unwind"`), handles opened on the
+same path share one environment (Flutter hot restart safe), and interactive
+transactions run on an owner thread and roll back after an idle timeout.
 
-// ❌ DON'T: Create new connections
-for i in 0..1000 {
-    let db = AppDbState::init("my_db".to_string())?; // Slow!
-    db.push(create_model(i))?;
-}
-```
+## Options
 
-## 🧪 Testing
+`OpenOptions` (Rust) or the `options` JSON of `ofc_open`:
 
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_basic_crud() {
-        let db = AppDbState::init("test_db".to_string()).unwrap();
-        
-        let model = LocalDbModel {
-            id: "test_1".to_string(),
-            hash: "test_hash".to_string(),
-            data: json!({"name": "Test User"}),
-        };
-        
-        // Insert
-        assert!(db.push(model).is_ok());
-        
-        // Read
-        let retrieved = db.get_by_id("test_1").unwrap();
-        assert!(retrieved.is_some());
-        
-        // Update
-        let mut updated = retrieved.unwrap();
-        updated.data["name"] = json!("Updated User");
-        assert!(db.update(updated).is_ok());
-        
-        // Delete
-        assert!(db.delete_by_id("test_1").unwrap());
-    }
-}
-```
+| Field | Default | Meaning |
+|---|---|---|
+| `max_dbs` | 1024 | Tables + indexes |
+| `initial_map_size` | 64 MiB | Reserved address space, not disk space |
+| `max_map_size` | 16 GiB (1 GiB on 32-bit) | The map doubles when full, up to this size |
+| `durability` | `full` | `full`: every commit is flushed (`F_FULLFSYNC` on Apple). `no_meta_sync` / `no_sync`: faster, a *system* crash may undo the last transactions |
 
-## 📦 Integration Examples
+## Upgrading from 0.5
 
-### Flutter Plugin
+0.5 stored data with LMDB 0.9, whose file format LMDB 1.0 cannot read.
+Opening such a database fails with `LegacyFormat` and leaves the data file
+untouched. Migrate through the Dart SDK: `flutter_local_db` 1.6 exports the
+records (`LocalDB.exportAll`), and 2.0 imports them. The key-value API and its
+JSON contract are otherwise unchanged; `create_db` now uses the path exactly
+as given (previously `./` was prepended, which misplaced absolute paths on
+Linux and Windows).
 
-```dart
-// pubspec.yaml
-dependencies:
-  ffi: ^2.0.0
+## Benchmarks
 
-// lib/database.dart
-import 'dart:ffi';
-import 'dart:io';
+`cargo run --release --example bench -- 10000` — median of 5 runs, durable
+commits, Apple M1 Max, macOS 26.7, 10 000 rows with two indexes:
 
-class NativeDatabase {
-  late DynamicLibrary _lib;
-  
-  NativeDatabase() {
-    if (Platform.isAndroid) {
-      _lib = DynamicLibrary.open('liboffline_first_core.so');
-    } else if (Platform.isIOS) {
-      _lib = DynamicLibrary.process();
-    }
-  }
-  
-  // Define your FFI functions here...
-}
-```
+| Operation | Per op |
+|---|---|
+| Insert, batch of 10 000 in one transaction | 6.4 µs |
+| Insert, one transaction per row | 8.9 ms (one `F_FULLFSYNC` per commit) |
+| Find by primary key | 1.4 µs |
+| Indexed query (`city = x AND age > y`, limit 50) | 202 µs |
+| Top 20 through an index (`order(age.desc())`) | 26 µs |
+| Full scan with an unindexed filter (10 000 rows) | 5.4 ms |
+| Update one row by key (own transaction) | 9.0 ms |
 
-### React Native
+Durable single-row commits cost one full flush on Apple hardware; group writes
+in a transaction or a batch to amortize it.
 
-```javascript
-// Install react-native-ffi
-npm install react-native-ffi
+## Building the native libraries
 
-// Use the library
-import { NativeModules } from 'react-native';
-const { OfflineFirstCore } = NativeModules;
+`scripts/build-binaries.sh` builds the Apple (iOS xcframework, universal macOS
+dylib) and Android (`jniLibs`) libraries; the
+[release workflow](.github/workflows/release.yml) builds every platform,
+including Linux and Windows, and attaches them with checksums to the GitHub
+release of each tag.
 
-async function saveData(id, data) {
-  const result = await OfflineFirstCore.pushData(id, JSON.stringify(data));
-  return JSON.parse(result);
-}
-```
+## License
 
-## 📋 Changelog
-
-### v0.5.0 - TEST
-- Update documentation
-
-### v0.4.0 - TEST
-- Improve test cases
-
-### v0.3.0 - LMDB Migration
-- ✨ Migrated from redb to LMDB
-- ✨ Added `close_database()` function
-- 🐛 Fixed Flutter hot restart issues
-- 🔧 Improved error handling
-- 📚 Added comprehensive test suite (60+ tests)
-
-### v0.2.0 - Feature Expansion
-- ✨ Added `clear_all_records()` and `reset_database()`
-- 🔧 Improved error handling
-- 🛡️ Enhanced FFI safety
-
-### v0.1.0 - Initial Release
-- ✨ Basic CRUD operations
-- 🔌 FFI interface for cross-platform integration
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-<div align="center">
-
-**Made with ❤️ for developers who need reliable offline storage**
-
-[⭐ Star on GitHub](https://github.com/JhonaCodes/offline_first_core) • [📦 View on Crates.io](https://crates.io/crates/offline_first_core) • [📖 Read the Docs](https://docs.rs/offline_first_core)
-
-</div>
+MIT. LMDB is distributed under the OpenLDAP Public License (see natdb).

@@ -1,7 +1,7 @@
 //! # Offline First Core
 //!
-//! A high-performance local storage library designed for FFI (Foreign Function Interface) 
-//! integration with Flutter and other cross-platform applications. Built on LMDB 
+//! A high-performance local storage library designed for FFI (Foreign Function Interface)
+//! integration with Flutter and other cross-platform applications. Built on LMDB
 //! (Lightning Memory-Mapped Database) for maximum stability and hot restart support.
 //!
 //! ## Features
@@ -15,23 +15,28 @@
 //! ## Quick Start
 //!
 //! ```no_run
-//! use offline_first_core::{create_db, push_data, get_by_id};
+//! use offline_first_core::{close_database, create_db, ofc_free_string, push_data};
 //! use std::ffi::CString;
 //!
 //! // Create database instance
-//! let db_name = CString::new("my_database").unwrap();
-//! let db_state = create_db(db_name.as_ptr());
+//! let db_name = CString::new("/absolute/path/to/my_database").unwrap();
+//! let db = unsafe { create_db(db_name.as_ptr()) };
 //!
-//! // Insert data
+//! // Insert data, then release the response string
 //! let json_data = CString::new(r#"{"id":"1","hash":"abc","data":{"key":"value"}}"#).unwrap();
-//! let result = push_data(db_state, json_data.as_ptr());
+//! let result = unsafe { push_data(db, json_data.as_ptr()) };
+//! unsafe { ofc_free_string(result.cast_mut()) };
+//!
+//! // Release the handle
+//! let result = unsafe { close_database(db) };
+//! unsafe { ofc_free_string(result.cast_mut()) };
 //! ```
 //!
 //! ## FFI Functions
 //!
 //! This library exposes C-compatible functions for cross-language integration:
 //!
-//! - [`create_db`] - Initialize database instance
+//! - [`create_db`] - Open a database and return a handle to it
 //! - [`push_data`] - Insert new records
 //! - [`get_by_id`] - Retrieve records by ID
 //! - [`get_all`] - Retrieve all records
@@ -39,43 +44,100 @@
 //! - [`delete_by_id`] - Delete records by ID
 //! - [`clear_all_records`] - Clear all database contents
 //! - [`reset_database`] - Reset database to clean state
-//! - [`close_database`] - Explicit connection cleanup
+//! - [`close_database`] - Release a handle
+//! - [`ofc_free_string`] - Release a response string
+//!
+//! ## Contract of the C ABI
+//!
+//! - **Responses**: every function except [`create_db`] and
+//!   [`ofc_free_string`] returns a JSON envelope `{"<Variant>": "<payload>"}`
+//!   (`Ok`, `NotFound`, `DatabaseError`, `SerializationError`,
+//!   `ValidationError` or `BadRequest`). The string is owned by the caller and
+//!   must be released with [`ofc_free_string`], exactly once; it must not be
+//!   released with the C `free`.
+//! - **Handles**: [`create_db`] returns an opaque [`DbHandle`] pointer. Each
+//!   call returns its own handle, and handles opened on the same path share a
+//!   single database, so opening a path twice (several isolates, a Flutter hot
+//!   restart that lost its pointer) works and sees the same data. A handle may
+//!   be used from several threads at once. [`close_database`] releases a
+//!   handle; the database closes with its last handle.
+//! - **Paths** are used exactly as given, with `.lmdb` appended. Relative
+//!   paths resolve against the working directory of the process, so callers
+//!   should pass absolute paths.
+//! - **Panics** never cross the boundary: an internal panic is logged and
+//!   answered with `{"DatabaseError": "internal panic in <function>: <message>"}`
+//!   (a null handle for [`create_db`]). This relies on `panic = "unwind"`,
+//!   which the release profile sets.
+//! - **Pointer arguments** of the entry points are not checked beyond null,
+//!   so every entry point is an `unsafe extern "C" fn`: passing anything else
+//!   than what its `# Safety` section allows is undefined behavior. `unsafe`
+//!   is not part of the C symbol, so C and Dart callers are unaffected.
+//!
+//! ## Naming of new symbols
+//!
+//! New exported symbols use the `ofc_` prefix (for *offline first core*), as
+//! [`ofc_free_string`] does. On iOS the library is linked statically into the
+//! app, where every exported symbol shares the process's global namespace
+//! (Dart looks them up with `DynamicLibrary.process()`), so generic names such
+//! as `free_string` could collide with other libraries. The nine original
+//! symbols keep their names for compatibility.
+//!
+//! ## Cargo features
+//!
+//! - `fault-injection` (off by default, **tests only**): exports
+//!   `ofc_fault_injection_arm`, which makes the next entry point called on the
+//!   same thread panic inside its guard, to test the panic containment. It
+//!   must never be enabled in a shipped build.
 
+mod app_response;
+mod boundary;
+pub mod engine;
+#[cfg(feature = "fault-injection")]
+mod fault_injection;
+mod handle;
 pub mod local_db_model;
 pub mod local_db_state;
-mod test;
-mod app_response;
+mod registry;
+pub mod wire;
 
-use crate::local_db_model::LocalDbModel;
-use crate::local_db_state::AppDbState;
+use std::ffi::{c_char, CString};
+use std::path::Path;
+use std::ptr;
 
-use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
 use log::{info, warn};
 
 use crate::app_response::AppResponse;
+use crate::boundary::Call;
+use crate::engine::OpenOptions;
+use crate::local_db_model::LocalDbModel;
+use crate::local_db_state::AppDbState;
 
-/// Creates a new database instance with the specified name.
+#[cfg(feature = "fault-injection")]
+pub use crate::fault_injection::ofc_fault_injection_arm;
+pub use crate::handle::DbHandle;
+
+/// Opens the database stored at `<name>.lmdb`, creating it if needed, and
+/// returns a new handle to it.
 ///
-/// This function initializes an LMDB environment and creates the main database
-/// for storing key-value pairs. The database will be created as a directory
-/// with `.lmdb` extension.
+/// The database is an LMDB environment stored as a directory. If the path is
+/// already open in this process, the new handle shares that database (it
+/// sees the same data); otherwise the database is opened.
 ///
 /// # Parameters
 ///
-/// * `name` - A null-terminated C string containing the database name
+/// * `name` - A null-terminated UTF-8 C string with the database path, without
+///   the `.lmdb` extension. It is used exactly as given: pass an absolute
+///   path, since a relative one resolves against the working directory.
 ///
 /// # Returns
 ///
-/// Returns a pointer to the [`AppDbState`] instance on success, or a null pointer on failure.
-/// The caller is responsible for managing the returned pointer's lifetime.
+/// A new [`DbHandle`] pointer on success, or null on failure. The handle must
+/// be released with [`close_database`].
 ///
 /// # Safety
 ///
-/// This function is unsafe because it:
-/// - Dereferences a raw pointer without validation
-/// - Returns a raw pointer that must be properly managed
-/// - Requires the input string to be valid UTF-8
+/// `name` must be null or point to a NUL-terminated string that stays valid
+/// for the duration of the call.
 ///
 /// # Examples
 ///
@@ -83,51 +145,46 @@ use crate::app_response::AppResponse;
 /// use std::ffi::CString;
 /// use offline_first_core::create_db;
 ///
-/// let name = CString::new("test_database").unwrap();
-/// let db_state = create_db(name.as_ptr());
-/// 
-/// if !db_state.is_null() {
+/// let name = CString::new("/absolute/path/test_database").unwrap();
+/// let db = unsafe { create_db(name.as_ptr()) };
+///
+/// if !db.is_null() {
 ///     // Database created successfully
 /// }
 /// ```
 ///
 /// # Errors
 ///
-/// Returns null pointer if:
-/// - Input name pointer is null
-/// - Input string contains invalid UTF-8
-/// - Database initialization fails
+/// Returns null if:
+/// - `name` is null or not valid UTF-8
+/// - the database cannot be opened
+/// - an internal panic occurs
 #[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
-    if name.is_null() {
-        warn!("Null name pointer passed to create_db");
-        return std::ptr::null_mut();
-    }
+pub unsafe extern "C" fn create_db(name: *const c_char) -> *mut DbHandle {
+    let call = Call::new("create_db");
+    call.guard(
+        |_| ptr::null_mut(),
+        || {
+            let name = match call.string_arg(name, "name") {
+                Ok(name) => name,
+                Err(response) => {
+                    warn!("{response}");
+                    return ptr::null_mut();
+                }
+            };
 
-    let name_str = match unsafe { CStr::from_ptr(name).to_str() } {
-        Ok(s) => s,
-        Err(e) => {
-            warn!("Invalid UTF-8 in name parameter: {e}");
-            return std::ptr::null_mut();
-        }
-    };
-
-    let db_path = format!("./{name_str}");
-
-    if std::path::Path::new(&format!("{db_path}.lmdb")).exists() {
-        info!("Database already exists, opening existing database");
-    } else {
-        info!("Creating new database");
-    }
-
-    let state = AppDbState::init(db_path);
-    info!("Database initialized");
-    
-    match state {
-        Ok(response) => Box::into_raw(Box::new(response)),
-        Err(_) => std::ptr::null_mut(),
-    }
+            match DbHandle::open(&name) {
+                Ok(handle) => {
+                    info!("Database initialized at {name}");
+                    Box::into_raw(Box::new(handle))
+                }
+                Err(e) => {
+                    warn!("Failed to initialize database at {name}: {e}");
+                    ptr::null_mut()
+                }
+            }
+        },
+    )
 }
 
 /// Inserts a new record into the database.
@@ -137,18 +194,19 @@ pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
 ///
 /// # Parameters
 ///
-/// * `state` - Pointer to the database state instance
+/// * `state` - Handle returned by [`create_db`]
 /// * `json_ptr` - Null-terminated C string containing JSON data
 ///
 /// # Returns
 ///
-/// Returns a JSON-formatted C string containing the operation result.
-/// The returned string must be freed by the caller.
+/// A JSON envelope with the stored record, to be released with
+/// [`ofc_free_string`].
 ///
 /// # Safety
 ///
-/// This function is unsafe because it dereferences raw pointers.
-/// Both parameters must be valid pointers to their respective types.
+/// `state` must be null or a handle returned by [`create_db`] that has not
+/// been closed; `json_ptr` must be null or a NUL-terminated string. Both must
+/// stay valid for the duration of the call.
 ///
 /// # Examples
 ///
@@ -156,11 +214,11 @@ pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
 /// use std::ffi::CString;
 /// use offline_first_core::{create_db, push_data};
 ///
-/// let db_name = CString::new("test_db").unwrap();
-/// let db_state = create_db(db_name.as_ptr());
+/// let db_name = CString::new("/absolute/path/test_db").unwrap();
+/// let db = unsafe { create_db(db_name.as_ptr()) };
 ///
 /// let json = CString::new(r#"{"id":"1","hash":"abc123","data":{"name":"test"}}"#).unwrap();
-/// let result = push_data(db_state, json.as_ptr());
+/// let result = unsafe { push_data(db, json.as_ptr()) };
 /// ```
 ///
 /// # JSON Format
@@ -169,66 +227,42 @@ pub extern "C" fn create_db(name: *const c_char) -> *mut AppDbState {
 /// ```json
 /// {
 ///   "id": "unique_identifier",
-///   "hash": "content_hash", 
+///   "hash": "content_hash",
 ///   "data": { /* arbitrary JSON data */ }
 /// }
 /// ```
 #[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn push_data(state: *mut AppDbState, json_ptr: *const c_char) -> *const c_char {
-    let state = match unsafe { state.as_ref() } {
-        Some(s) => s,
-        None => {
-            let error = AppResponse::BadRequest("Null state pointer".to_string());
-            return response_to_c_string(&error);
-        }
-    };
+pub unsafe extern "C" fn push_data(state: *mut DbHandle, json_ptr: *const c_char) -> *const c_char {
+    Call::new("push_data").respond(|call| {
+        let handle = call.handle(state)?;
+        let json = call.string_arg(json_ptr, "JSON")?;
+        let model: LocalDbModel = serde_json::from_str(&json)
+            .map_err(|e| AppResponse::SerializationError(format!("Invalid JSON: {e}")))?;
 
-    let json_str = match c_ptr_to_string(json_ptr, "JSON") {
-        Ok(response) => response,
-        Err(err) => return err
-    };
-
-    let model: LocalDbModel = match serde_json::from_str(&json_str) {
-        Ok(m) => m,
-        Err(e) => {
-            let error = AppResponse::SerializationError(format!("Invalid JSON: {e}"));
-            return response_to_c_string(&error);
-        }
-    };
-    
-    match state.push(model) {
-        Ok(result_model) => {
-            match serde_json::to_string(&result_model) {
-                Ok(json) => {
-                    let success = AppResponse::Ok(json);
-                    response_to_c_string(&success)
-                },
-                Err(e) => {
-                    let error = AppResponse::SerializationError(format!("Failed to serialize result: {e}"));
-                    response_to_c_string(&error)
-                }
-            }
-        },
-        Err(e) => response_to_c_string(&e)
-    }
+        let stored = handle.legacy(|db| db.push(model.clone()))?;
+        serde_json::to_string(&stored).map_err(|e| {
+            AppResponse::SerializationError(format!("Failed to serialize result: {e}"))
+        })
+    })
 }
 
 /// Retrieves a record from the database by its ID.
 ///
 /// # Parameters
 ///
-/// * `state` - Pointer to the database state instance
+/// * `state` - Handle returned by [`create_db`]
 /// * `id` - Null-terminated C string containing the record ID
 ///
 /// # Returns
 ///
-/// Returns a JSON-formatted C string containing the record data if found,
-/// or an error response if not found or on failure.
+/// A JSON envelope with the record, or `NotFound`, to be released with
+/// [`ofc_free_string`].
 ///
 /// # Safety
 ///
-/// Both parameters must be valid pointers. The ID string must be valid UTF-8.
+/// `state` must be null or a handle returned by [`create_db`] that has not
+/// been closed; `id` must be null or a NUL-terminated string. Both must stay
+/// valid for the duration of the call.
 ///
 /// # Examples
 ///
@@ -236,70 +270,43 @@ pub extern "C" fn push_data(state: *mut AppDbState, json_ptr: *const c_char) -> 
 /// use std::ffi::CString;
 /// use offline_first_core::{create_db, get_by_id};
 ///
-/// let db_name = CString::new("test_db").unwrap();
-/// let db_state = create_db(db_name.as_ptr());
+/// let db_name = CString::new("/absolute/path/test_db").unwrap();
+/// let db = unsafe { create_db(db_name.as_ptr()) };
 ///
 /// let id = CString::new("record_1").unwrap();
-/// let result = get_by_id(db_state, id.as_ptr());
+/// let result = unsafe { get_by_id(db, id.as_ptr()) };
 /// ```
 #[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn get_by_id(state: *mut AppDbState, id: *const c_char) -> *const c_char {
-    if state.is_null() {
-        let error = AppResponse::BadRequest("Null state pointer passed to get_by_id".to_string());
-        return response_to_c_string(&error);
-    }
+pub unsafe extern "C" fn get_by_id(state: *mut DbHandle, id: *const c_char) -> *const c_char {
+    Call::new("get_by_id").respond(|call| {
+        let handle = call.handle(state)?;
+        let id = call.string_arg(id, "id")?;
 
-    if id.is_null() {
-        let error = AppResponse::BadRequest("Null id pointer passed to get_by_id".to_string());
-        return response_to_c_string(&error);
-    }
-
-    let state = unsafe { &*state };
-
-    let id_str = match c_ptr_to_string(id, "id") {
-        Ok(json) => json,
-        Err(error_ptr) => return error_ptr,
-    };
-
-    match state.get_by_id(&id_str) {
-        Ok(Some(model)) => {
-            match serde_json::to_string(&model) {
-                Ok(json) => {
-                    let success = AppResponse::Ok(json);
-                    response_to_c_string(&success)
-                },
-                Err(e) => {
-                    let error = AppResponse::SerializationError(format!("Error serializing to JSON: {e:?}"));
-                    response_to_c_string(&error)
-                }
-            }
-        },
-        Ok(None) => {
-            let error = AppResponse::NotFound(format!("No model found with id: {id_str}"));
-            response_to_c_string(&error)
-        },
-        Err(e) => {
-            let error = AppResponse::from(e);
-            response_to_c_string(&error)
-        }
-    }
+        let model = handle
+            .db()
+            .get_by_id(&id)?
+            .ok_or_else(|| AppResponse::NotFound(format!("No model found with id: {id}")))?;
+        serde_json::to_string(&model).map_err(|e| {
+            AppResponse::SerializationError(format!("Error serializing to JSON: {e:?}"))
+        })
+    })
 }
 
 /// Retrieves all records from the database.
 ///
 /// # Parameters
 ///
-/// * `state` - Pointer to the database state instance
+/// * `state` - Handle returned by [`create_db`]
 ///
 /// # Returns
 ///
-/// Returns a JSON-formatted C string containing an array of all records,
-/// or an error response on failure.
+/// A JSON envelope with an array of every record, to be released with
+/// [`ofc_free_string`].
 ///
 /// # Safety
 ///
-/// The state parameter must be a valid pointer to an [`AppDbState`] instance.
+/// `state` must be null or a handle returned by [`create_db`] that has not
+/// been closed.
 ///
 /// # Examples
 ///
@@ -307,59 +314,41 @@ pub extern "C" fn get_by_id(state: *mut AppDbState, id: *const c_char) -> *const
 /// use std::ffi::CString;
 /// use offline_first_core::{create_db, get_all};
 ///
-/// let db_name = CString::new("test_db").unwrap();
-/// let db_state = create_db(db_name.as_ptr());
+/// let db_name = CString::new("/absolute/path/test_db").unwrap();
+/// let db = unsafe { create_db(db_name.as_ptr()) };
 ///
-/// let all_records = get_all(db_state);
+/// let all_records = unsafe { get_all(db) };
 /// ```
 #[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn get_all(state: *mut AppDbState) -> *const c_char {
-    if state.is_null() {
-        let error = AppResponse::BadRequest("Null state pointer passed to get_all".to_string());
-        return response_to_c_string(&error);
-    }
-
-    let state = unsafe { &*state };
-
-    match state.get() {
-        Ok(models) => {
-            match serde_json::to_string(&models) {
-                Ok(json) => {
-                    let success = AppResponse::Ok(json);
-                    response_to_c_string(&success)
-                },
-                Err(e) => {
-                    let error = AppResponse::SerializationError(format!("Error serializing models: {e:?}"));
-                    response_to_c_string(&error)
-                }
-            }
-        },
-        Err(e) => {
-            let error = AppResponse::from(e);
-            response_to_c_string(&error)
-        }
-    }
+pub unsafe extern "C" fn get_all(state: *mut DbHandle) -> *const c_char {
+    Call::new("get_all").respond(|call| {
+        let models = call.handle(state)?.db().get()?;
+        serde_json::to_string(&models).map_err(|e| {
+            AppResponse::SerializationError(format!("Error serializing models: {e:?}"))
+        })
+    })
 }
 
 /// Updates an existing record in the database.
 ///
 /// The record is identified by the ID field in the provided JSON data.
-/// If no record with that ID exists, the operation returns an error.
+/// If no record with that ID exists, the operation returns `NotFound`.
 ///
 /// # Parameters
 ///
-/// * `state` - Pointer to the database state instance
+/// * `state` - Handle returned by [`create_db`]
 /// * `json_ptr` - Null-terminated C string containing updated JSON data
 ///
 /// # Returns
 ///
-/// Returns a JSON-formatted C string containing the updated record on success,
-/// or an error response if the record doesn't exist or on failure.
+/// A JSON envelope with the updated record, to be released with
+/// [`ofc_free_string`].
 ///
 /// # Safety
 ///
-/// Both parameters must be valid pointers.
+/// `state` must be null or a handle returned by [`create_db`] that has not
+/// been closed; `json_ptr` must be null or a NUL-terminated string. Both must
+/// stay valid for the duration of the call.
 ///
 /// # Examples
 ///
@@ -367,79 +356,50 @@ pub extern "C" fn get_all(state: *mut AppDbState) -> *const c_char {
 /// use std::ffi::CString;
 /// use offline_first_core::{create_db, update_data};
 ///
-/// let db_name = CString::new("test_db").unwrap();
-/// let db_state = create_db(db_name.as_ptr());
+/// let db_name = CString::new("/absolute/path/test_db").unwrap();
+/// let db = unsafe { create_db(db_name.as_ptr()) };
 ///
 /// let json = CString::new(r#"{"id":"1","hash":"new_hash","data":{"updated":true}}"#).unwrap();
-/// let result = update_data(db_state, json.as_ptr());
+/// let result = unsafe { update_data(db, json.as_ptr()) };
 /// ```
 #[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn update_data(state: *mut AppDbState, json_ptr: *const c_char) -> *const c_char {
-    if state.is_null() {
-        let error = AppResponse::BadRequest("Null state pointer passed to update_data".to_string());
-        return response_to_c_string(&error);
-    }
+pub unsafe extern "C" fn update_data(
+    state: *mut DbHandle,
+    json_ptr: *const c_char,
+) -> *const c_char {
+    Call::new("update_data").respond(|call| {
+        let handle = call.handle(state)?;
+        let json = call.string_arg(json_ptr, "JSON")?;
+        let model: LocalDbModel = serde_json::from_str(&json).map_err(|e| {
+            AppResponse::SerializationError(format!("Error deserializing JSON: {e:?}"))
+        })?;
 
-    if json_ptr.is_null() {
-        let error = AppResponse::BadRequest("Null JSON pointer passed to update_data".to_string());
-        return response_to_c_string(&error);
-    }
-
-    let json_str = match c_ptr_to_string(json_ptr, "JSON") {
-        Ok(json) => json,
-        Err(error_ptr) => return error_ptr,
-    };
-
-    let model: LocalDbModel = match serde_json::from_str(&json_str) {
-        Ok(m) => m,
-        Err(e) => {
-            let error = AppResponse::SerializationError(format!("Error deserializing JSON: {e:?}"));
-            return response_to_c_string(&error);
-        }
-    };
-
-    let state = unsafe { &*state };
-
-    match state.update(model) {
-        Ok(Some(updated_model)) => {
-            match serde_json::to_string(&updated_model) {
-                Ok(json) => {
-                    let success = AppResponse::Ok(json);
-                    response_to_c_string(&success)
-                },
-                Err(e) => {
-                    let error = AppResponse::SerializationError(format!("Error serializing updated model: {e:?}"));
-                    response_to_c_string(&error)
-                }
-            }
-        },
-        Ok(None) => {
-            let error = AppResponse::NotFound("Model not found for update".to_string());
-            response_to_c_string(&error)
-        },
-        Err(e) => {
-            let error = AppResponse::from(e);
-            response_to_c_string(&error)
-        }
-    }
+        let updated = handle
+            .legacy(|db| db.update(model.clone()))?
+            .ok_or_else(|| AppResponse::NotFound("Model not found for update".to_string()))?;
+        serde_json::to_string(&updated).map_err(|e| {
+            AppResponse::SerializationError(format!("Error serializing updated model: {e:?}"))
+        })
+    })
 }
 
 /// Deletes a record from the database by its ID.
 ///
 /// # Parameters
 ///
-/// * `db_state` - Pointer to the database state instance
+/// * `db_state` - Handle returned by [`create_db`]
 /// * `id` - Null-terminated C string containing the record ID to delete
 ///
 /// # Returns
 ///
-/// Returns a JSON-formatted C string indicating success or failure.
-/// Success response includes confirmation of deletion.
+/// A JSON envelope confirming the deletion, or `NotFound`, to be released
+/// with [`ofc_free_string`].
 ///
 /// # Safety
 ///
-/// Both parameters must be valid pointers.
+/// `db_state` must be null or a handle returned by [`create_db`] that has not
+/// been closed; `id` must be null or a NUL-terminated string. Both must stay
+/// valid for the duration of the call.
 ///
 /// # Examples
 ///
@@ -447,46 +407,26 @@ pub extern "C" fn update_data(state: *mut AppDbState, json_ptr: *const c_char) -
 /// use std::ffi::CString;
 /// use offline_first_core::{create_db, delete_by_id};
 ///
-/// let db_name = CString::new("test_db").unwrap();
-/// let db_state = create_db(db_name.as_ptr());
+/// let db_name = CString::new("/absolute/path/test_db").unwrap();
+/// let db = unsafe { create_db(db_name.as_ptr()) };
 ///
 /// let id = CString::new("record_to_delete").unwrap();
-/// let result = delete_by_id(db_state, id.as_ptr());
+/// let result = unsafe { delete_by_id(db, id.as_ptr()) };
 /// ```
 #[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn delete_by_id(db_state: *mut AppDbState, id: *const c_char) -> *const c_char {
-    if db_state.is_null() {
-        let error = AppResponse::BadRequest("Null state pointer passed to delete_by_id".to_string());
-        return response_to_c_string(&error);
-    }
+pub unsafe extern "C" fn delete_by_id(db_state: *mut DbHandle, id: *const c_char) -> *const c_char {
+    Call::new("delete_by_id").respond(|call| {
+        let handle = call.handle(db_state)?;
+        let id = call.string_arg(id, "id")?;
 
-    if id.is_null() {
-        let error = AppResponse::BadRequest("Null id pointer passed to delete_by_id".to_string());
-        return response_to_c_string(&error);
-    }
-
-    let id_str = match c_ptr_to_string(id, "id") {
-        Ok(id) => id,
-        Err(error_ptr) => return error_ptr,
-    };
-
-    let db_state = unsafe { &mut *db_state };
-
-    match db_state.delete_by_id(&id_str) {
-        Ok(true) => {
-            let success = AppResponse::Ok("Record deleted successfully".to_string());
-            response_to_c_string(&success)
-        },
-        Ok(false) => {
-            let not_found = AppResponse::NotFound(format!("No record found with id: {id_str}"));
-            response_to_c_string(&not_found)
-        },
-        Err(e) => {
-            let error = AppResponse::from(e);
-            response_to_c_string(&error)
+        if handle.legacy(|db| db.delete_by_id(&id))? {
+            Ok("Record deleted successfully".to_string())
+        } else {
+            Err(AppResponse::NotFound(format!(
+                "No record found with id: {id}"
+            )))
         }
-    }
+    })
 }
 
 /// Clears all records from the database.
@@ -496,16 +436,17 @@ pub extern "C" fn delete_by_id(db_state: *mut AppDbState, id: *const c_char) -> 
 ///
 /// # Parameters
 ///
-/// * `db_state` - Pointer to the database state instance
+/// * `db_state` - Handle returned by [`create_db`]
 ///
 /// # Returns
 ///
-/// Returns a JSON-formatted C string indicating the number of records cleared
-/// or an error response on failure.
+/// A JSON envelope confirming the operation, to be released with
+/// [`ofc_free_string`].
 ///
 /// # Safety
 ///
-/// The db_state parameter must be a valid pointer.
+/// `db_state` must be null or a handle returned by [`create_db`] that has not
+/// been closed.
 ///
 /// # Examples
 ///
@@ -513,52 +454,54 @@ pub extern "C" fn delete_by_id(db_state: *mut AppDbState, id: *const c_char) -> 
 /// use std::ffi::CString;
 /// use offline_first_core::{create_db, clear_all_records};
 ///
-/// let db_name = CString::new("test_db").unwrap();
-/// let db_state = create_db(db_name.as_ptr());
+/// let db_name = CString::new("/absolute/path/test_db").unwrap();
+/// let db = unsafe { create_db(db_name.as_ptr()) };
 ///
-/// let result = clear_all_records(db_state);
+/// let result = unsafe { clear_all_records(db) };
 /// ```
 #[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn clear_all_records(db_state: *mut AppDbState) -> *const c_char {
-    if db_state.is_null() {
-        let error = AppResponse::BadRequest("Null state pointer passed to clear_all_records".to_string());
-        return response_to_c_string(&error);
-    }
-
-    let db_state = unsafe { &*db_state };
-
-    match db_state.clear_all_records() {
-        Ok(_) => {
-            let success = AppResponse::Ok("All records cleared successfully".to_string());
-            response_to_c_string(&success)
-        },
-        Err(e) => {
-            let error = AppResponse::from(e);
-            response_to_c_string(&error)
-        }
-    }
+pub unsafe extern "C" fn clear_all_records(db_state: *mut DbHandle) -> *const c_char {
+    Call::new("clear_all_records").respond(|call| {
+        call.handle(db_state)?
+            .legacy(AppDbState::clear_all_records)?;
+        Ok("All records cleared successfully".to_string())
+    })
 }
 
 /// Resets the database to a clean state with a new name.
 ///
 /// This operation:
-/// 1. Closes the current database connection
+/// 1. Closes the current database environment
 /// 2. Removes the existing database directory
-/// 3. Creates a new database with the specified name
+/// 3. Creates a new database at `<name>.lmdb`
+///
+/// It acts on the database shared by every handle opened on the same path:
+/// all of them keep working, on the new database. It waits for the operations
+/// in flight on those handles and blocks new ones until it finishes.
 ///
 /// # Parameters
 ///
-/// * `db_state` - Pointer to the database state instance
-/// * `name_ptr` - Null-terminated C string containing the new database name
+/// * `db_state` - Handle returned by [`create_db`]
+/// * `name_ptr` - Null-terminated C string with the new database path, used
+///   exactly as given (see [`create_db`])
 ///
 /// # Returns
 ///
-/// Returns a JSON-formatted C string indicating success or failure.
+/// A JSON envelope indicating success or failure, to be released with
+/// [`ofc_free_string`].
+///
+/// # Errors
+///
+/// - If another database of this process is open at `name`, nothing changes
+///   and a `DatabaseError` reports that the path is already open.
+/// - If a later step fails, the database stays closed: every handle sharing
+///   it answers `DatabaseError` until it is closed.
 ///
 /// # Safety
 ///
-/// Both parameters must be valid pointers.
+/// `db_state` must be null or a handle returned by [`create_db`] that has not
+/// been closed; `name_ptr` must be null or a NUL-terminated string. Both must
+/// stay valid for the duration of the call.
 ///
 /// # Examples
 ///
@@ -566,61 +509,50 @@ pub extern "C" fn clear_all_records(db_state: *mut AppDbState) -> *const c_char 
 /// use std::ffi::CString;
 /// use offline_first_core::{create_db, reset_database};
 ///
-/// let db_name = CString::new("test_db").unwrap();
-/// let db_state = create_db(db_name.as_ptr());
+/// let db_name = CString::new("/absolute/path/test_db").unwrap();
+/// let db = unsafe { create_db(db_name.as_ptr()) };
 ///
-/// let new_name = CString::new("reset_db").unwrap();
-/// let result = reset_database(db_state, new_name.as_ptr());
+/// let new_name = CString::new("/absolute/path/reset_db").unwrap();
+/// let result = unsafe { reset_database(db, new_name.as_ptr()) };
 /// ```
 #[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn reset_database(db_state: *mut AppDbState, name_ptr: *const c_char) -> *const c_char {
-    if db_state.is_null() {
-        let error = AppResponse::BadRequest("Null state pointer passed to reset_database".to_string());
-        return response_to_c_string(&error);
-    }
+pub unsafe extern "C" fn reset_database(
+    db_state: *mut DbHandle,
+    name_ptr: *const c_char,
+) -> *const c_char {
+    Call::new("reset_database").respond(|call| {
+        let handle = call.handle(db_state)?;
+        let name = call.string_arg(name_ptr, "name")?;
 
-    if name_ptr.is_null() {
-        let error = AppResponse::BadRequest("Null name pointer passed to reset_database".to_string());
-        return response_to_c_string(&error);
-    }
-
-    let name = match c_ptr_to_string(name_ptr, "name") {
-        Ok(name) => name,
-        Err(error_ptr) => return error_ptr,
-    };
-
-    let db_state = unsafe { &mut *db_state };
-
-    match db_state.reset_database(&name) {
-        Ok(_) => {
-            let success = AppResponse::Ok(format!("Database '{name}' was reset successfully"));
-            response_to_c_string(&success)
-        },
-        Err(e) => {
-            let error = AppResponse::DatabaseError(format!("Error resetting database: {e:?}"));
-            response_to_c_string(&error)
-        }
-    }
+        handle.reset(&name)?;
+        Ok(format!("Database '{name}' was reset successfully"))
+    })
 }
 
-/// Explicitly closes the database connection.
+/// Releases a handle returned by [`create_db`].
 ///
-/// This function provides explicit connection management, which is particularly
-/// useful for Flutter hot restart scenarios where resources need to be cleaned up
-/// before reconnecting.
+/// Other handles opened on the same path keep working; the database
+/// environment is closed, and its files released, when its last handle is
+/// released. Closing is required before reopening the same path from another
+/// process, and useful before a Flutter hot restart.
 ///
 /// # Parameters
 ///
-/// * `db_state` - Pointer to the database state instance
+/// * `db_state` - Handle returned by [`create_db`]
 ///
 /// # Returns
 ///
-/// Returns a JSON-formatted C string indicating success or failure.
+/// A JSON envelope indicating success or failure, to be released with
+/// [`ofc_free_string`].
 ///
 /// # Safety
 ///
-/// The db_state parameter must be a valid pointer.
+/// `db_state` must be null or a handle returned by [`create_db`] that has not
+/// been closed, and no other call may be using it concurrently.
+///
+/// This call takes ownership of the handle: **the pointer is invalid once it
+/// returns, whatever the response**. Using it afterwards, or closing it a
+/// second time, is undefined behavior, exactly like calling `free` twice.
 ///
 /// # Examples
 ///
@@ -628,103 +560,145 @@ pub extern "C" fn reset_database(db_state: *mut AppDbState, name_ptr: *const c_c
 /// use std::ffi::CString;
 /// use offline_first_core::{create_db, close_database};
 ///
-/// let db_name = CString::new("test_db").unwrap();
-/// let db_state = create_db(db_name.as_ptr());
+/// let db_name = CString::new("/absolute/path/test_db").unwrap();
+/// let db = unsafe { create_db(db_name.as_ptr()) };
 ///
 /// // Before hot restart or application shutdown
-/// let result = close_database(db_state);
+/// let result = unsafe { close_database(db) };
 /// ```
-///
-/// # Notes
-///
-/// In LMDB, connections are automatically closed when the environment is dropped.
-/// This function serves as an explicit indicator that the connection should no longer be used.
 #[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn close_database(db_state: *mut AppDbState) -> *const c_char {
-    if db_state.is_null() {
-        let error = AppResponse::BadRequest("Null state pointer passed to close_database".to_string());
-        return response_to_c_string(&error);
-    }
+pub unsafe extern "C" fn close_database(db_state: *mut DbHandle) -> *const c_char {
+    Call::new("close_database").respond(|call| {
+        drop(call.take_handle(db_state)?);
+        Ok("Database connection closed successfully".to_string())
+    })
+}
 
-    let db_state = unsafe { &mut *db_state };
-
-    match db_state.close_database() {
-        Ok(_) => {
-            let success = AppResponse::Ok("Database connection closed successfully".to_string());
-            response_to_c_string(&success)
+/// Releases a string returned by any function of this library.
+///
+/// Every response string must be released with this function exactly once.
+/// Passing null does nothing.
+///
+/// # Safety
+///
+/// `ptr` must be null or a string returned by a function of this library that
+/// has not been released yet. It must not be used after this call.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::ffi::CString;
+/// use offline_first_core::{create_db, get_all, ofc_free_string};
+///
+/// let db_name = CString::new("/absolute/path/test_db").unwrap();
+/// let db = unsafe { create_db(db_name.as_ptr()) };
+///
+/// let records = unsafe { get_all(db) };
+/// // ... read the JSON envelope ...
+/// unsafe { ofc_free_string(records.cast_mut()) };
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn ofc_free_string(ptr: *mut c_char) {
+    Call::new("ofc_free_string").guard(
+        |_| (),
+        || {
+            if ptr.is_null() {
+                return;
+            }
+            // SAFETY: the caller guarantees `ptr` came from `CString::into_raw`
+            // in this library and has not been released yet.
+            drop(unsafe { CString::from_raw(ptr) });
         },
-        Err(e) => {
-            let error = AppResponse::from(e);
-            response_to_c_string(&error)
-        }
-    }
+    );
 }
 
-/// Converts an [`AppResponse`] to a C-compatible string.
+/// Opens the database stored at `<path>.lmdb` for the query engine and the
+/// legacy API, and writes a new handle to `*out`.
 ///
-/// This internal helper function serializes the response to JSON format
-/// and converts it to a C string that can be returned to FFI callers.
+/// Unlike [`create_db`], failures are reported: the return value is a
+/// wire-protocol response (see [`wire`]), `{"v":1,"ok":{}}` on success or
+/// `{"v":1,"error":{"code":"LegacyFormat",...}}` for a database written by
+/// offline_first_core 0.5 or older (LMDB 0.9), which LMDB 1.0 cannot read.
 ///
-/// # Parameters
+/// `options` is null or a JSON object with the fields of
+/// [`engine::OpenOptions`] (`max_dbs`, `initial_map_size`,
+/// `max_map_size`); they only apply if the path is not open yet.
 ///
-/// * `response` - Reference to the response to convert
-///
-/// # Returns
-///
-/// Returns a pointer to a null-terminated C string containing the JSON response.
-/// The caller is responsible for freeing this memory.
+/// The handle is released with [`close_database`]; the response string with
+/// [`ofc_free_string`].
 ///
 /// # Safety
 ///
-/// Returns a null pointer if serialization or C string creation fails.
-fn response_to_c_string(response: &AppResponse) -> *const c_char {
-    let json = match serde_json::to_string(response) {
-        Ok(j) => j,
-        Err(e) => {
-            warn!("Error serializing response: {e}");
-            return std::ptr::null();
+/// `path` and `options` must be null or point to NUL-terminated strings valid
+/// for the duration of the call; `out` must be null or point to writable
+/// memory for one pointer. On failure `*out` is set to null.
+#[no_mangle]
+pub unsafe extern "C" fn ofc_open(
+    path: *const c_char,
+    options: *const c_char,
+    out: *mut *mut DbHandle,
+) -> *const c_char {
+    let call = Call::new("ofc_open");
+    call.respond_wire(|call| {
+        if out.is_null() {
+            return wire::error_response("InvalidRequest", "null out pointer passed to ofc_open");
         }
-    };
-
-    match CString::new(json) {
-        Ok(c_str) => c_str.into_raw(),
-        Err(e) => {
-            warn!("Error creating CString: {e}");
-            std::ptr::null()
+        // SAFETY: `out` is non-null and writable per the contract above.
+        unsafe { out.write(ptr::null_mut()) };
+        let path = match call.wire_str(path, "path") {
+            Ok(path) => path,
+            Err(response) => return response,
+        };
+        let options: OpenOptions = if options.is_null() {
+            OpenOptions::default()
+        } else {
+            let json = match call.wire_str(options, "options") {
+                Ok(json) => json,
+                Err(response) => return response,
+            };
+            match serde_json::from_str(&json) {
+                Ok(options) => options,
+                Err(e) => return wire::error_response("InvalidRequest", &format!("options: {e}")),
+            }
+        };
+        let dir = local_db_state::db_dir_name(&path);
+        match DbHandle::open_dir(Path::new(&dir), &options) {
+            Ok(handle) => {
+                info!("Database opened at {dir}");
+                // SAFETY: as above.
+                unsafe { out.write(Box::into_raw(Box::new(handle))) };
+                format!(r#"{{"v":{},"ok":{{}}}}"#, wire::PROTOCOL_VERSION)
+            }
+            Err(error) => {
+                warn!("Failed to open database at {dir}: {error}");
+                wire::error_response(error.code(), &error.to_string())
+            }
         }
-    }
+    })
 }
 
-/// Converts a C string pointer to a Rust String with comprehensive error handling.
-///
-/// This internal helper function safely converts C string pointers to Rust strings,
-/// handling all possible error conditions including null pointers and invalid UTF-8.
-///
-/// # Parameters
-///
-/// * `ptr` - Pointer to the C string
-/// * `field_name` - Name of the field for descriptive error messages
-///
-/// # Returns
-///
-/// * `Ok(String)` - If conversion was successful
-/// * `Err(*const c_char)` - Pointer to error message in C format if conversion failed
+/// Executes one request of the wire protocol (see [`wire`]) on `handle` and
+/// returns the response JSON, to be released with [`ofc_free_string`].
 ///
 /// # Safety
 ///
-/// This function safely handles null pointers and invalid UTF-8 sequences.
-fn c_ptr_to_string(ptr: *const c_char, field_name: &str) -> Result<String, *const c_char> {
-    if ptr.is_null() {
-        let error = AppResponse::BadRequest(format!("Null {field_name} pointer"));
-        return Err(response_to_c_string(&error));
-    }
-
-    match unsafe { CStr::from_ptr(ptr).to_str() } {
-        Ok(s) => Ok(s.to_string()),
-        Err(e) => {
-            let error = AppResponse::BadRequest(format!("Invalid UTF-8 in {field_name}: {e}"));
-            Err(response_to_c_string(&error))
+/// `handle` must be null or a live handle from [`create_db`] or [`ofc_open`];
+/// `request` must be null or point to a NUL-terminated string valid for the
+/// duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn ofc_execute(
+    handle: *mut DbHandle,
+    request: *const c_char,
+) -> *const c_char {
+    let call = Call::new("ofc_execute");
+    call.respond_wire(|call| {
+        // SAFETY: a non-null handle is live per the contract above.
+        let Some(handle) = (unsafe { handle.as_ref() }) else {
+            return wire::error_response("InvalidRequest", "null handle passed to ofc_execute");
+        };
+        match call.wire_str(request, "request") {
+            Ok(request) => wire::handle(handle.shared(), &request),
+            Err(response) => response,
         }
-    }
+    })
 }

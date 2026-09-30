@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Keep the other platforms running when one fails, to see every
+      # platform-specific failure in a single run.
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run clippy (fault-injection feature)
+        run: cargo clippy --all-targets --features fault-injection -- -D warnings
+
+      - name: Run tests
+        run: cargo test
+
+      # The panic containment of the C ABI is only testable with the test-only
+      # `fault-injection` feature, which `cargo test` does not enable.
+      - name: Run panic containment tests (fault-injection feature)
+        run: cargo test --features fault-injection --test panic_boundary

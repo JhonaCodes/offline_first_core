@@ -4,12 +4,18 @@
 //! and FFI interactions. It defines the [`AppResponse`] enum that encapsulates
 //! both successful results and various error conditions, with automatic conversion
 //! from LMDB errors and JSON serialization errors.
+//!
+//! This module is private, so the examples below are marked `ignore`: doctests
+//! are compiled as external crates and can only reach the public API.
 
 use std::fmt::{Display, Formatter};
 
-use lmdb::Error as LmdbError;
+use natdb::Error as MdbError;
 use serde::{Deserialize, Serialize};
 use serde_json::Error as SerdeError;
+
+use crate::local_db_state::DbError;
+use crate::registry::ResetError;
 
 /// Unified response type for all database operations and FFI interactions.
 ///
@@ -45,7 +51,7 @@ use serde_json::Error as SerdeError;
 ///
 /// ## Creating responses
 ///
-/// ```rust
+/// ```ignore
 /// use offline_first_core::app_response::AppResponse;
 ///
 /// // Success response
@@ -58,7 +64,7 @@ use serde_json::Error as SerdeError;
 ///
 /// ## JSON serialization
 ///
-/// ```rust
+/// ```ignore
 /// use offline_first_core::app_response::AppResponse;
 /// use serde_json;
 ///
@@ -70,14 +76,14 @@ use serde_json::Error as SerdeError;
 ///
 /// ## Error conversion
 ///
-/// ```rust
+/// ```ignore
 /// use offline_first_core::app_response::AppResponse;
-/// use lmdb::Error as LmdbError;
+/// use natdb::Error as MdbError;
 ///
 /// // Automatic conversion from LMDB errors
-/// let lmdb_error = LmdbError::NotFound;
+/// let lmdb_error = MdbError::NotFound;
 /// let app_response: AppResponse = lmdb_error.into();
-/// 
+///
 /// match app_response {
 ///     AppResponse::NotFound(msg) => println!("Not found: {}", msg),
 ///     _ => println!("Other error"),
@@ -92,7 +98,7 @@ pub enum AppResponse {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use offline_first_core::app_response::AppResponse;
     ///
     /// let error = AppResponse::DatabaseError(
@@ -108,7 +114,7 @@ pub enum AppResponse {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use offline_first_core::app_response::AppResponse;
     ///
     /// let error = AppResponse::SerializationError(
@@ -124,7 +130,7 @@ pub enum AppResponse {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use offline_first_core::app_response::AppResponse;
     ///
     /// let error = AppResponse::NotFound(
@@ -140,7 +146,7 @@ pub enum AppResponse {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use offline_first_core::app_response::AppResponse;
     ///
     /// let error = AppResponse::ValidationError(
@@ -156,7 +162,7 @@ pub enum AppResponse {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use offline_first_core::app_response::AppResponse;
     ///
     /// let error = AppResponse::BadRequest(
@@ -173,7 +179,7 @@ pub enum AppResponse {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use offline_first_core::app_response::AppResponse;
     ///
     /// let success = AppResponse::Ok(
@@ -191,7 +197,7 @@ impl Display for AppResponse {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use offline_first_core::app_response::AppResponse;
     ///
     /// let error = AppResponse::DatabaseError("Connection failed".to_string());
@@ -212,78 +218,91 @@ impl Display for AppResponse {
     }
 }
 
-impl From<LmdbError> for AppResponse {
-    /// Converts LMDB errors into application responses.
+impl From<DbError> for AppResponse {
+    /// Converts storage-layer errors into application responses.
     ///
-    /// This implementation provides automatic conversion from all LMDB error
-    /// types into appropriate [`AppResponse`] variants, enabling seamless
-    /// error handling throughout the application.
+    /// This is the FFI boundary mapping. Engine errors keep the variants and
+    /// messages produced by 0.5.0 (see the [`MdbError`] mapping below) so the
+    /// JSON contract seen by the Dart plugin does not change.
     ///
     /// # Error Mapping
     ///
-    /// - `LmdbError::NotFound` → `AppResponse::NotFound`
-    /// - `LmdbError::KeyExist` → `AppResponse::BadRequest`
+    /// - [`DbError::Storage`] → see the [`MdbError`] mapping
+    /// - [`DbError::Serialization`] → `AppResponse::SerializationError`
+    /// - I/O, corrupt stored records and a closed database → `AppResponse::DatabaseError`
+    fn from(err: DbError) -> Self {
+        match err {
+            DbError::Storage(error) => AppResponse::from(error),
+            DbError::Serialization(error) => AppResponse::from(error),
+            DbError::Engine(error) => AppResponse::DatabaseError(error.to_string()),
+            DbError::Io(_)
+            | DbError::Utf8 { .. }
+            | DbError::Deserialization { .. }
+            | DbError::Closed => AppResponse::DatabaseError(err.to_string()),
+        }
+    }
+}
+
+impl From<ResetError> for AppResponse {
+    /// Converts a failed `reset_database` into an application response.
+    ///
+    /// Storage errors keep the message produced by 0.5.0
+    /// (`Error resetting database: <debug form of the error>`).
+    fn from(err: ResetError) -> Self {
+        let detail = match &err {
+            ResetError::Db(error) => format!("{error:?}"),
+            ResetError::AlreadyOpen(_) => err.to_string(),
+        };
+        AppResponse::DatabaseError(format!("Error resetting database: {detail}"))
+    }
+}
+
+impl From<MdbError> for AppResponse {
+    /// Converts LMDB error codes into application responses.
+    ///
+    /// # Error Mapping
+    ///
+    /// - `MdbError::NotFound` → `AppResponse::NotFound`
+    /// - `MdbError::KeyExist` → `AppResponse::BadRequest`
     /// - Database corruption errors → `AppResponse::DatabaseError`
     /// - Resource limit errors → `AppResponse::DatabaseError`
     /// - Other errors → `AppResponse::DatabaseError`
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use offline_first_core::app_response::AppResponse;
-    /// use lmdb::Error as LmdbError;
-    ///
-    /// // Automatic conversion using the ? operator
-    /// fn database_operation() -> Result<String, AppResponse> {
-    ///     // This LMDB error is automatically converted to AppResponse
-    ///     let txn = env.begin_ro_txn()?; // LmdbError becomes AppResponse
-    ///     Ok("Success".to_string())
-    /// }
-    /// ```
-    fn from(err: LmdbError) -> Self {
+    fn from(err: MdbError) -> Self {
         match err {
-            LmdbError::KeyExist =>
-                AppResponse::BadRequest("Key already exists".to_string()),
-            LmdbError::NotFound =>
-                AppResponse::NotFound("Record not found".to_string()),
-            LmdbError::Corrupted =>
-                AppResponse::DatabaseError("Database is corrupted".to_string()),
-            LmdbError::Panic =>
-                AppResponse::DatabaseError("Database panic occurred".to_string()),
-            LmdbError::MapFull =>
-                AppResponse::DatabaseError("Database map is full".to_string()),
-            LmdbError::DbsFull =>
-                AppResponse::DatabaseError("Maximum databases reached".to_string()),
-            LmdbError::ReadersFull =>
-                AppResponse::DatabaseError("Maximum readers reached".to_string()),
-            LmdbError::TxnFull =>
-                AppResponse::DatabaseError("Transaction is full".to_string()),
-            LmdbError::CursorFull =>
-                AppResponse::DatabaseError("Cursor stack is full".to_string()),
-            LmdbError::PageFull =>
-                AppResponse::DatabaseError("Page is full".to_string()),
-            LmdbError::MapResized =>
-                AppResponse::DatabaseError("Database map was resized".to_string()),
-            LmdbError::Incompatible =>
-                AppResponse::DatabaseError("Database is incompatible".to_string()),
-            LmdbError::BadRslot =>
-                AppResponse::DatabaseError("Bad reader locktable slot".to_string()),
-            LmdbError::BadTxn =>
-                AppResponse::DatabaseError("Invalid transaction".to_string()),
-            LmdbError::BadValSize =>
-                AppResponse::DatabaseError("Value size is invalid".to_string()),
-            LmdbError::BadDbi =>
-                AppResponse::DatabaseError("Invalid database handle".to_string()),
-            LmdbError::Other(code) =>
-                AppResponse::DatabaseError(format!("LMDB error code: {code}")),
-            LmdbError::PageNotFound =>
-                AppResponse::DatabaseError("Page not found".to_string()),
-            LmdbError::VersionMismatch =>
-                AppResponse::DatabaseError("Version mismatch".to_string()),
-            LmdbError::Invalid =>
-                AppResponse::DatabaseError("Invalid LMDB file".to_string()),
-            LmdbError::TlsFull =>
-                AppResponse::DatabaseError("TLS keys full".to_string()),
+            MdbError::KeyExist => AppResponse::BadRequest("Key already exists".to_string()),
+            MdbError::NotFound => AppResponse::NotFound("Record not found".to_string()),
+            MdbError::Corrupted => AppResponse::DatabaseError("Database is corrupted".to_string()),
+            MdbError::Panic => AppResponse::DatabaseError("Database panic occurred".to_string()),
+            MdbError::MapFull => AppResponse::DatabaseError("Database map is full".to_string()),
+            MdbError::DbsFull => {
+                AppResponse::DatabaseError("Maximum databases reached".to_string())
+            }
+            MdbError::ReadersFull => {
+                AppResponse::DatabaseError("Maximum readers reached".to_string())
+            }
+            MdbError::TxnFull => AppResponse::DatabaseError("Transaction is full".to_string()),
+            MdbError::CursorFull => AppResponse::DatabaseError("Cursor stack is full".to_string()),
+            MdbError::PageFull => AppResponse::DatabaseError("Page is full".to_string()),
+            MdbError::MapResized => {
+                AppResponse::DatabaseError("Database map was resized".to_string())
+            }
+            MdbError::Incompatible => {
+                AppResponse::DatabaseError("Database is incompatible".to_string())
+            }
+            MdbError::BadRslot => {
+                AppResponse::DatabaseError("Bad reader locktable slot".to_string())
+            }
+            MdbError::BadTxn => AppResponse::DatabaseError("Invalid transaction".to_string()),
+            MdbError::BadValSize => AppResponse::DatabaseError("Value size is invalid".to_string()),
+            MdbError::BadDbi => AppResponse::DatabaseError("Invalid database handle".to_string()),
+            MdbError::Other(code) => AppResponse::DatabaseError(format!("LMDB error code: {code}")),
+            MdbError::PageNotFound => AppResponse::DatabaseError("Page not found".to_string()),
+            MdbError::VersionMismatch => AppResponse::DatabaseError("Version mismatch".to_string()),
+            MdbError::Invalid => AppResponse::DatabaseError("Invalid LMDB file".to_string()),
+            MdbError::TlsFull => AppResponse::DatabaseError("TLS keys full".to_string()),
+            MdbError::LegacyFormat => AppResponse::DatabaseError(
+                "Database was written by LMDB 0.9 and must be migrated".to_string(),
+            ),
         }
     }
 }
@@ -297,7 +316,7 @@ impl From<SerdeError> for AppResponse {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use offline_first_core::app_response::AppResponse;
     /// use serde_json;
     ///
@@ -316,36 +335,5 @@ impl From<SerdeError> for AppResponse {
     /// ```
     fn from(err: SerdeError) -> Self {
         AppResponse::SerializationError(format!("JSON serialization error: {err}"))
-    }
-}
-
-impl AppResponse {
-    /// Creates a successful response with the provided message.
-    ///
-    /// This is a convenience method for creating [`AppResponse::Ok`] variants
-    /// with automatic string conversion.
-    ///
-    /// # Parameters
-    ///
-    /// * `msg` - The success message or data, can be any type that implements `Into<String>`
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use offline_first_core::app_response::AppResponse;
-    ///
-    /// // With string literals
-    /// let response1 = AppResponse::success("Operation completed");
-    ///
-    /// // With owned strings
-    /// let message = "Data saved successfully".to_string();
-    /// let response2 = AppResponse::success(message);
-    ///
-    /// // With formatted strings
-    /// let count = 42;
-    /// let response3 = AppResponse::success(format!("Processed {} items", count));
-    /// ```
-    pub fn success(msg: impl Into<String>) -> Self {
-        AppResponse::Ok(msg.into())
     }
 }
