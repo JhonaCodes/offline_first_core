@@ -499,3 +499,64 @@ fn explain_of_a_join_names_its_strategy_and_every_table() {
         "TableNotFound"
     );
 }
+
+#[test]
+fn a_sync_round_trip_over_the_wire() {
+    let dir = TestDir::new("wire_sync");
+    let db = Wire::open(&dir, "sync");
+    db.ok(json!({"v": 1, "op": "define_table", "table": {
+        "name": "notes", "primary_key": "id", "sync": "primary"
+    }}));
+    let tables = db.ok(json!({"v": 1, "op": "tables"}));
+    assert_eq!(tables["tables"][0]["sync"], "primary");
+    db.ok(json!({"v": 1, "op": "execute", "statement": {
+        "op": "insert", "table": "notes", "rows": [{"id": "a", "title": "t"}]
+    }}));
+
+    let status = db.ok(json!({"v": 1, "op": "sync_status", "remote": "primary"}));
+    assert_eq!(
+        status,
+        json!({"checkpoint": null, "pending": 1, "conflicts": 0})
+    );
+    let batch = db.ok(json!({"v": 1, "op": "sync_claim", "remote": "primary", "max_changes": 10}));
+    let envelope = &batch["envelopes"][0];
+    assert_eq!(envelope["row"], json!({"id": "a", "title": "t"}));
+    assert_eq!(envelope["operation"], "upsert");
+
+    let outcome = db.ok(
+        json!({"v": 1, "op": "sync_push_result", "remote": "primary",
+        "lease_id": batch["lease_id"],
+        "acknowledged": [{
+            "mutation_id": envelope["mutation_id"], "table": "notes", "key": "a",
+            "local_revision": envelope["local_revision"], "server_version": "v1"
+        }]}),
+    );
+    assert_eq!(outcome["acknowledged"], 1);
+    let state = db.ok(json!({"v": 1, "op": "sync_state", "table": "notes", "key": "a"}));
+    assert_eq!(state["state"]["state"], "synced");
+    assert_eq!(state["state"]["server_version"], "v1");
+
+    let applied = db.ok(
+        json!({"v": 1, "op": "sync_apply_remote", "remote": "primary",
+        "expected_checkpoint": null, "next_checkpoint": 7,
+        "changes": [{"table": "notes", "key": "b", "operation": "upsert",
+            "row": {"id": "b", "title": "remote"}, "server_version": "v2"}]}),
+    );
+    assert_eq!(applied["applied"], 1);
+    assert_eq!(
+        db.error_code(
+            json!({"v": 1, "op": "sync_apply_remote", "remote": "primary",
+            "expected_checkpoint": null, "next_checkpoint": 8, "changes": []})
+        ),
+        "StaleCheckpoint"
+    );
+    let pending = db.ok(json!({"v": 1, "op": "sync_pending", "remote": "primary"}));
+    assert_eq!(pending, json!({"count": 0, "changes": []}));
+    assert_eq!(
+        db.error_code(
+            json!({"v": 1, "op": "sync_resolve", "conflict": "conflict-9",
+            "expected_row_version": 1, "resolution": {"kind": "accept_remote"}})
+        ),
+        "ConflictNotFound"
+    );
+}

@@ -17,6 +17,19 @@
 //! | `tx_execute` | `transaction`, `statement` | statement result |
 //! | `savepoint`, `release`, `rollback_to`, `commit`, `rollback` | `transaction` | `{}` |
 //! | `info` | — | `{"map_size": n, "lmdb": "1.0.2", "tables": n}` |
+//! | `sync_claim` | `remote`, [`ClaimLimits`] fields | [`ClaimedBatch`] |
+//! | `sync_push_result` | `remote`, [`PushResult`] fields | [`PushOutcome`] |
+//! | `sync_release` | `remote`, `lease_id`, `reason` | `{"released": n}` |
+//! | `sync_retry` | `remote`, `mutation_ids` | `{"retried": n}` |
+//! | `sync_apply_remote` | `remote`, [`RemotePage`] fields | [`ApplyOutcome`] |
+//! | `sync_resolve` | `conflict`, `expected_row_version`, `resolution`: [`Resolution`] | `{}` |
+//! | `sync_state` | `table`, `key` | `{"state": `[`EntityState`]`\|null}` |
+//! | `sync_pending` | `remote`, `table`, `limit` | [`PendingChanges`] |
+//! | `sync_conflicts` | `remote` | `{"conflicts": [`[`Conflict`]`]}` |
+//! | `sync_status` | `remote` | [`RemoteStatus`] |
+//!
+//! The sync operations ([`sync`]) run in transactions
+//! of their own; their records use the field names of the Rust types.
 //!
 //! Statement results: `{"rows": [...]}` (`select`, `group`, `join`),
 //! `{"row": {...}|null}` (find), `{"count": n}`, `{"value": v}` (aggregate),
@@ -32,6 +45,11 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use crate::engine::session::{self, Mode};
+use crate::engine::sync::{self, ClaimLimits, PushResult, RemotePage, Resolution};
+#[cfg(doc)]
+use crate::engine::sync::{
+    ApplyOutcome, ClaimedBatch, Conflict, EntityState, PendingChanges, PushOutcome, RemoteStatus,
+};
 use crate::engine::{
     exec, tx, EngineError, EngineResult, JoinQuery, Output, Select, Statement, TableDef,
 };
@@ -63,6 +81,80 @@ fn field<T: DeserializeOwned>(request: &Value, name: &str) -> EngineResult<T> {
         .ok_or_else(|| EngineError::InvalidRequest(format!("missing field `{name}`")))?;
     serde_json::from_value(value)
         .map_err(|e| EngineError::InvalidRequest(format!("field `{name}`: {e}")))
+}
+
+/// The whole request read as `T` (its other fields are ignored).
+fn fields<T: DeserializeOwned>(request: &Value) -> EngineResult<T> {
+    serde_json::from_value(request.clone())
+        .map_err(|e| EngineError::InvalidRequest(format!("request: {e}")))
+}
+
+fn to_json<T: serde::Serialize>(value: &T) -> EngineResult<String> {
+    serde_json::to_string(value).map_err(|e| EngineError::InvalidRequest(e.to_string()))
+}
+
+/// The sync operations, or `None` when `op` is not one of them.
+fn dispatch_sync(
+    shared: &Arc<SharedDb>,
+    op: &str,
+    request: &Value,
+) -> Option<EngineResult<String>> {
+    let remote = || field::<String>(request, "remote");
+    let result = match op {
+        "sync_claim" => remote().and_then(|remote| {
+            let limits: ClaimLimits = fields(request)?;
+            to_json(&shared.run(|store| sync::claim(store, &remote, &limits))?)
+        }),
+        "sync_push_result" => remote().and_then(|remote| {
+            let result: PushResult = fields(request)?;
+            to_json(&shared.run(|store| sync::apply_push_result(store, &remote, &result))?)
+        }),
+        "sync_release" => remote().and_then(|remote| {
+            let lease_id: u64 = field(request, "lease_id")?;
+            let reason = request
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("released");
+            let released = shared.run(|store| sync::release(store, &remote, lease_id, reason))?;
+            Ok(json!({ "released": released }).to_string())
+        }),
+        "sync_retry" => remote().and_then(|remote| {
+            let ids: Vec<String> = field(request, "mutation_ids")?;
+            let retried = shared.run(|store| sync::retry(store, &remote, &ids))?;
+            Ok(json!({ "retried": retried }).to_string())
+        }),
+        "sync_apply_remote" => remote().and_then(|remote| {
+            let page: RemotePage = fields(request)?;
+            to_json(&shared.run(|store| sync::apply_remote(store, &remote, &page))?)
+        }),
+        "sync_resolve" => (|| {
+            let id: String = field(request, "conflict")?;
+            let expected: u64 = field(request, "expected_row_version")?;
+            let resolution: Resolution = field(request, "resolution")?;
+            shared.run(|store| sync::resolve_conflict(store, &id, expected, &resolution))?;
+            Ok("{}".to_string())
+        })(),
+        "sync_state" => (|| {
+            let table: String = field(request, "table")?;
+            let key: Value = field(request, "key")?;
+            let state = shared.run(|store| sync::state_of(store, &table, &key))?;
+            Ok(json!({ "state": state }).to_string())
+        })(),
+        "sync_pending" => remote().and_then(|remote| {
+            let table = request.get("table").and_then(Value::as_str);
+            let limit = request.get("limit").and_then(Value::as_u64);
+            to_json(&shared.run(|store| sync::pending(store, &remote, table, limit))?)
+        }),
+        "sync_conflicts" => remote().and_then(|remote| {
+            let conflicts = shared.run(|store| sync::conflicts(store, &remote))?;
+            Ok(json!({ "conflicts": conflicts }).to_string())
+        }),
+        "sync_status" => {
+            remote().and_then(|remote| to_json(&shared.run(|store| sync::status(store, &remote))?))
+        }
+        _ => return None,
+    };
+    Some(result)
 }
 
 fn dispatch(shared: &Arc<SharedDb>, request: &str) -> EngineResult<String> {
@@ -163,9 +255,11 @@ fn dispatch(shared: &Arc<SharedDb>, request: &str) -> EngineResult<String> {
             })
             .to_string())
         }
-        other => Err(EngineError::InvalidRequest(format!(
-            "unknown operation `{other}`"
-        ))),
+        other => dispatch_sync(shared, other, &request).unwrap_or_else(|| {
+            Err(EngineError::InvalidRequest(format!(
+                "unknown operation `{other}`"
+            )))
+        }),
     }
 }
 

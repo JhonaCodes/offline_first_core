@@ -11,7 +11,8 @@ use super::error::{EngineError, EngineResult};
 use super::exec;
 use super::schema::TableDef;
 use super::stmt::{JoinQuery, Output, Select, Statement};
-use super::store::OpenOptions;
+use super::store::{OpenOptions, Store};
+use super::sync::SyncApi;
 use super::tx::{self, ReadTx, WriteTx, WriterGuard};
 use crate::registry::{self, SharedDb};
 
@@ -163,6 +164,20 @@ impl Db {
     /// Size of the memory map, in bytes.
     pub fn map_size(&self) -> EngineResult<usize> {
         self.shared.run(|store| store.map_size())
+    }
+
+    /// The sync operations (outbox, acknowledgements, remote changes and
+    /// conflicts) of the synchronized tables: see [`sync`](super::sync).
+    pub fn sync(&self) -> SyncApi<'_> {
+        SyncApi::new(self)
+    }
+
+    /// Runs `op` on the store; a full map is grown and `op` replayed.
+    pub(crate) fn with_store<R>(
+        &self,
+        op: impl FnMut(&Store) -> EngineResult<R>,
+    ) -> EngineResult<R> {
+        self.shared.run(op)
     }
 }
 

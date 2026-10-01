@@ -18,6 +18,7 @@ use serde_json::Value;
 use super::error::{EngineError, EngineResult};
 use super::keys::encode_key;
 use super::schema::{IndexDef, TableDef};
+use super::sync::{self, SYNC_DB_NAME};
 use super::value::field;
 
 /// Name of the database holding the records of the legacy API (0.5.0 layout).
@@ -49,7 +50,8 @@ pub enum Durability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OpenOptions {
-    /// Maximum number of tables plus indexes, plus two internal databases.
+    /// Maximum number of tables plus indexes, plus two internal databases
+    /// (three once a table is synchronized).
     pub max_dbs: u32,
     /// Initial size of the memory map, in bytes. It is reserved address space,
     /// not disk space: the file grows with the data.
@@ -143,6 +145,8 @@ pub struct Store {
     env: Environment,
     legacy: Database,
     catalog: Database,
+    /// The sync records, once a table is synchronized.
+    sync: OnceLock<Database>,
     tables: RwLock<HashMap<String, Arc<Table>>>,
     max_key_size: usize,
     max_map_size: usize,
@@ -180,12 +184,21 @@ impl Store {
             .open(dir)?;
         let legacy = env.create_db(Some(LEGACY_DB_NAME), DatabaseFlags::empty())?;
         let catalog = env.create_db(Some(CATALOG_DB_NAME), DatabaseFlags::empty())?;
+        let sync = OnceLock::new();
+        match env.open_db(Some(SYNC_DB_NAME)) {
+            Ok(db) => {
+                let _ = sync.set(db);
+            }
+            Err(natdb::Error::NotFound) => {}
+            Err(e) => return Err(e.into()),
+        }
         // SAFETY: `env.env()` is the open environment; the call only reads it.
         let lmdb_max_key_size = unsafe { natdb_sys::mdb_env_get_maxkeysize(env.env()) };
         let store = Self {
             env,
             legacy,
             catalog,
+            sync,
             tables: RwLock::new(HashMap::new()),
             max_key_size: usize::try_from(lmdb_max_key_size)
                 .map_or(PROTOCOL_MAX_KEY_SIZE, |lmdb| {
@@ -246,6 +259,11 @@ impl Store {
         self.legacy
     }
 
+    /// Database of the sync records, if a table was ever synchronized.
+    pub(crate) fn sync_db(&self) -> Option<Database> {
+        self.sync.get().copied()
+    }
+
     /// Largest key LMDB accepts in this environment.
     pub fn max_key_size(&self) -> usize {
         self.max_key_size
@@ -295,8 +313,21 @@ impl Store {
                     detail: "the primary key and auto_increment cannot change".to_string(),
                 });
             }
+            if existing.def.sync.is_some() && existing.def.sync != def.sync {
+                return Err(EngineError::SchemaMismatch {
+                    table: def.name.clone(),
+                    detail: "a synchronized table keeps its remote".to_string(),
+                });
+            }
         }
         let mut txn = self.env.begin_rw_txn()?;
+        let created_sync = match (&def.sync, self.sync_db()) {
+            // SAFETY: as below.
+            (Some(_), None) => {
+                Some(unsafe { txn.create_db(Some(SYNC_DB_NAME), DatabaseFlags::empty())? })
+            }
+            _ => None,
+        };
         // SAFETY: the caller guarantees exclusive use of the environment, so no
         // other transaction opens, creates or drops databases concurrently. The
         // handles are only published after the commit.
@@ -344,6 +375,9 @@ impl Store {
             WriteFlags::empty(),
         )?;
         txn.commit()?;
+        if let Some(created) = created_sync {
+            let _ = self.sync.set(created);
+        }
         self.tables
             .write()
             .unwrap_or_else(PoisonError::into_inner)
@@ -399,6 +433,9 @@ impl Store {
                 txn.drop_db(index.db)?;
             }
             txn.drop_db(table.db)?;
+        }
+        if let (Some(_), Some(sync_db)) = (&table.def.sync, self.sync_db()) {
+            sync::purge_table(&mut txn, sync_db, name)?;
         }
         for key in [
             format!("{TABLE_PREFIX}{name}"),

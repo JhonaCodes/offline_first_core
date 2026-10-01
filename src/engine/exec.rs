@@ -20,6 +20,7 @@ use super::stmt::{
     OrderBy, Output, Select, Statement,
 };
 use super::store::{Index, Store, Table};
+use super::sync;
 use super::value::{field, sql_eq, total_cmp};
 
 const NULL: Value = Value::Null;
@@ -919,7 +920,7 @@ pub(crate) fn add_index_entry(
     Ok(())
 }
 
-fn remove_index_entries(
+pub(crate) fn remove_index_entries(
     txn: &mut RwTransaction<'_>,
     table: &Table,
     row: &Value,
@@ -935,7 +936,7 @@ fn remove_index_entries(
     Ok(())
 }
 
-fn add_index_entries(
+pub(crate) fn add_index_entries(
     store: &Store,
     txn: &mut RwTransaction<'_>,
     table: &Table,
@@ -948,7 +949,7 @@ fn add_index_entries(
     Ok(())
 }
 
-fn encode_row(row: &Value) -> EngineResult<Vec<u8>> {
+pub(crate) fn encode_row(row: &Value) -> EngineResult<Vec<u8>> {
     serde_json::to_vec(row).map_err(|e| EngineError::InvalidRequest(e.to_string()))
 }
 
@@ -998,7 +999,7 @@ fn insert(
             Err(natdb::Error::NotFound) => None,
             Err(e) => return Err(e.into()),
         };
-        if let Some(previous) = previous {
+        if let Some(previous) = &previous {
             match on_conflict {
                 OnConflict::Error => {
                     return Err(EngineError::DuplicateKey {
@@ -1009,12 +1010,13 @@ fn insert(
                     })
                 }
                 OnConflict::Ignore => continue,
-                OnConflict::Replace => remove_index_entries(txn, &table, &previous, &pk)?,
+                OnConflict::Replace => remove_index_entries(txn, &table, previous, &pk)?,
             }
         }
         add_index_entries(store, txn, &table, &row, &pk)?;
         let bytes = encode_row(&row)?;
         txn.put(table.db, &pk, &bytes, WriteFlags::empty())?;
+        sync::track(store, txn, &table, &pk, previous.as_ref(), Some(&row))?;
         written.push(bytes);
     }
     Ok(Output::Affected {
@@ -1151,6 +1153,7 @@ fn update(
         remove_index_entries(txn, &table, old, pk)?;
         add_index_entries(store, txn, &table, &new, pk)?;
         txn.put(table.db, pk, &encode_row(&new)?, WriteFlags::empty())?;
+        sync::track(store, txn, &table, pk, Some(old), Some(&new))?;
     }
     Ok(Output::Affected {
         count: rows.len() as u64,
@@ -1171,6 +1174,7 @@ fn delete(
     for (pk, _, old) in &rows {
         remove_index_entries(txn, &table, old, pk)?;
         txn.del(table.db, pk, None)?;
+        sync::track(store, txn, &table, pk, Some(old), None)?;
     }
     Ok(Output::Affected {
         count: rows.len() as u64,

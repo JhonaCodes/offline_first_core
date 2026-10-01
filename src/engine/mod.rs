@@ -21,12 +21,13 @@ pub mod schema;
 pub(crate) mod session;
 pub mod stmt;
 pub mod store;
+pub mod sync;
 pub(crate) mod tx;
 pub mod value;
 
 pub use db::{decode_rows, Db};
 pub use dsl::{col, Col, Delete, Group, Insert, Join, Query, Update};
-pub use error::{EngineError, EngineResult};
+pub use error::{EngineError, EngineResult, SyncError};
 pub use schema::{IndexDef, TableDef};
 pub use stmt::{
     Aggregate, AggregateSpec, Expr, GroupFunction, GroupQuery, JoinKind, JoinOn, JoinQuery,

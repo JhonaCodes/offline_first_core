@@ -10,7 +10,9 @@ use thiserror::Error;
 ///
 /// Every variant has a stable [`code`](EngineError::code), which the wire
 /// protocol sends to Dart; messages may change between versions, codes do not.
+/// New variants may appear in any release: match with a wildcard arm.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum EngineError {
     /// The statement names a table that is not defined.
     #[error("table `{0}` is not defined")]
@@ -127,6 +129,77 @@ pub enum EngineError {
     /// The request uses a protocol version this library does not speak.
     #[error("unsupported protocol version {0}")]
     UnsupportedProtocol(u64),
+    /// A sync operation was refused (see [`SyncError`]).
+    #[error(transparent)]
+    Sync(#[from] SyncError),
+}
+
+/// Why a sync operation was refused. Nothing changed when one is returned.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum SyncError {
+    /// The table (or the remote) is not synchronized.
+    #[error("`{0}` is not synchronized")]
+    NotTracked(String),
+    /// The mutation is not known to this database.
+    #[error("unknown mutation `{0}`")]
+    UnknownMutation(String),
+    /// An acknowledgement names a mutation, but not its entity, revision or
+    /// remote, or the mutation was never claimed.
+    #[error("the acknowledgement of `{mutation_id}` does not match it: {detail}")]
+    AcknowledgementMismatch {
+        /// The mutation.
+        mutation_id: String,
+        /// What differs.
+        detail: String,
+    },
+    /// The page was read after another checkpoint than the current one.
+    #[error("the checkpoint is {actual}, the page expected {expected}")]
+    StaleCheckpoint {
+        /// The checkpoint the page expected, as JSON.
+        expected: String,
+        /// The current checkpoint, as JSON.
+        actual: String,
+    },
+    /// The conflict does not exist (or was resolved).
+    #[error("unknown conflict `{0}`")]
+    ConflictNotFound(String),
+    /// The row changed since the conflict was read.
+    #[error("the row version is {actual}, the resolution expected {expected}")]
+    RowVersionMismatch {
+        /// The version the resolution expected.
+        expected: u64,
+        /// The current version.
+        actual: u64,
+    },
+    /// A change of the row is being sent: acknowledge or release it first.
+    #[error("mutation `{0}` is being sent; acknowledge or release it first")]
+    MutationInFlight(String),
+    /// The key was deleted and the deletion is not settled yet: it cannot be
+    /// created again meanwhile.
+    #[error("row {key} of `{table}` has a deletion that is not settled yet")]
+    TombstonePending {
+        /// Table name.
+        table: String,
+        /// The primary key, as JSON.
+        key: String,
+    },
+}
+
+impl SyncError {
+    /// Stable identifier of the error, used by the wire protocol.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotTracked(_) => "SyncNotTracked",
+            Self::UnknownMutation(_) => "UnknownMutation",
+            Self::AcknowledgementMismatch { .. } => "AcknowledgementMismatch",
+            Self::StaleCheckpoint { .. } => "StaleCheckpoint",
+            Self::ConflictNotFound(_) => "ConflictNotFound",
+            Self::RowVersionMismatch { .. } => "RowVersionMismatch",
+            Self::MutationInFlight(_) => "MutationInFlight",
+            Self::TombstonePending { .. } => "TombstonePending",
+        }
+    }
 }
 
 impl EngineError {
@@ -158,6 +231,7 @@ impl EngineError {
             Self::AlreadyOpen(_) => "AlreadyOpen",
             Self::Closed => "Closed",
             Self::UnsupportedProtocol(_) => "UnsupportedProtocol",
+            Self::Sync(error) => error.code(),
         }
     }
 

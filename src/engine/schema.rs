@@ -9,7 +9,11 @@ use super::error::{EngineError, EngineResult};
 /// Rows are JSON objects. The primary key is one field of the row; it
 /// identifies the row and orders a table scan. Every index is maintained in
 /// the same transaction as the row it indexes.
+///
+/// Build it with [`TableDef::new`] and the builder methods; fields may be
+/// added in any release.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TableDef {
     /// Table name: non-empty, without `:`, not starting with `__`.
     pub name: String,
@@ -21,6 +25,10 @@ pub struct TableDef {
     /// Secondary indexes.
     #[serde(default)]
     pub indexes: Vec<IndexDef>,
+    /// The remote this table synchronizes with (RFC §13.2): every effective
+    /// write records a change in the same transaction. `None`: local only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<String>,
 }
 
 /// A secondary index over one or more fields.
@@ -43,6 +51,7 @@ impl TableDef {
             primary_key: primary_key.into(),
             auto_increment: false,
             indexes: Vec::new(),
+            sync: None,
         }
     }
 
@@ -72,12 +81,25 @@ impl TableDef {
         self
     }
 
+    /// Synchronizes the table with `remote`, a logical name (not a URL): see
+    /// [`sync`](super::sync). Once synchronized, a table stays so.
+    pub fn sync_with(mut self, remote: impl Into<String>) -> Self {
+        self.sync = Some(remote.into());
+        self
+    }
+
     /// Checks names and fields.
     pub fn validate(&self) -> EngineResult<()> {
         validate_name("table", &self.name)?;
         if self.primary_key.is_empty() {
             return Err(EngineError::InvalidSchema(format!(
                 "table `{}` has an empty primary key",
+                self.name
+            )));
+        }
+        if self.sync.as_deref() == Some("") {
+            return Err(EngineError::InvalidSchema(format!(
+                "table `{}` synchronizes with an empty remote",
                 self.name
             )));
         }

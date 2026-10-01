@@ -194,6 +194,80 @@ let count = db.read_transaction(|snapshot| {
 })?;
 ```
 
+### Offline-first sync
+
+A table declared with `sync_with(remote)` records every effective write as
+an immutable change **in the same transaction** as the row, so a crash, a
+rolled back savepoint or a full disk can never keep the row and lose its
+pending change, or the other way around (RFC-001 §13). The network stays in
+your code; the engine only knows what is pending, what is being sent and
+what the server confirmed:
+
+```rust
+use offline_first_core::engine::sync::{
+    Acknowledgement, ClaimLimits, PushResult, RemotePage, Resolution,
+};
+
+db.define_table(TableDef::new("notes", "id").sync_with("primary"))?;
+Query::insert_into("notes", [json!({"id": "a", "title": "draft"})]).execute(&db)?;
+
+// Push: lease a batch in a short transaction, send it, record the answer.
+let batch = db.sync().claim("primary", &ClaimLimits::default())?;
+let versions = my_server.push(&batch.envelopes);          // your HTTP code
+db.sync().apply_push_result("primary", &PushResult {
+    lease_id: batch.lease_id,
+    acknowledged: batch.envelopes.iter().zip(versions)
+        .map(|(envelope, version)| Acknowledgement::of(envelope, version))
+        .collect(),
+    rejected: Vec::new(),
+})?;
+
+// Pull: a page and its checkpoint are stored together, or not at all.
+let status = db.sync().status("primary")?;
+let page = my_server.pull(&status.checkpoint);            // your HTTP code
+db.sync().apply_remote("primary", &RemotePage {
+    expected_checkpoint: status.checkpoint,
+    next_checkpoint: page.cursor,
+    changes: page.changes,
+})?;
+
+// A server change over a pending local change is kept as a conflict.
+for conflict in db.sync().conflicts("primary")? {
+    db.sync().resolve_conflict(&conflict.id, conflict.local_row_version, &Resolution::AcceptRemote)?;
+}
+```
+
+What it guarantees, each with its test in `tests/sync.rs`, `tests/sync_model.rs`
+and `tests/processes.rs`:
+
+- An acknowledgement settles exactly one mutation and revision: the ACK of
+  revision 7 never confirms revision 8 written while 7 was in flight.
+- One change per row is in flight, in revision order; an envelope keeps its
+  bytes, its `mutation_id` and its `base_version` (the server version it
+  builds on, fixed at the first claim) on every retry, so the server can
+  deduplicate.
+- A late release of an old lease, a duplicate ACK and a rejection for a
+  lease that moved on change nothing; an unknown or mismatched ACK is an
+  error that changes nothing.
+- A deletion leaves a tombstone until the server acknowledged it, and the
+  key cannot be created again meanwhile (`TombstonePending`); afterwards it
+  comes back as a new `generation`.
+- Remote changes never come back as local changes. Over a pending local
+  change they become a conflict, with both variants kept;
+  `resolve_conflict` takes the row version as a precondition, refuses while a
+  change is being sent, and accepting the remote variant settles the local
+  changes as resolved, never as acknowledged.
+- Rows written before a table was synchronized are `unknown`, never
+  `synced`; a synchronized table stays synchronized.
+
+A reference model runs 150 random sequences of 80 steps (writes, deletes,
+claims, lost and partial answers, duplicate ACKs, another device's writes,
+pulls, resolutions, restarts) against the engine and a simulated server,
+and checks that everything converges to the server's rows. The wire
+operations are `sync_claim`, `sync_push_result`, `sync_release`,
+`sync_retry`, `sync_apply_remote`, `sync_resolve`, `sync_state`,
+`sync_pending`, `sync_conflicts` and `sync_status` (see `src/wire.rs`).
+
 ## Diesel conformance
 
 [docs/diesel-conformance.md](https://github.com/JhonaCodes/offline_first_core/blob/main/docs/diesel-conformance.md)
@@ -254,6 +328,19 @@ LMDB transaction belongs to the thread that began it while Dart calls can
 arrive from any thread; a transaction left idle past its timeout (30 seconds
 by default) is rolled back, so an abandoned one — a killed isolate, a dropped
 connection — cannot hold the writer lock forever.
+
+**Sync.** The records of synchronized tables live in one more internal
+database, `__sync`, created with the first synchronized table: per-row
+metadata (revisions, the last known server version, the open changes), the
+open changes themselves, an index of open changes per remote in commit
+order, receipts of settled mutations (so a duplicate ACK is recognised),
+conflicts, checkpoints and counters. The insert, update and delete paths of
+the executor record a change right after writing the row, inside the same
+nested LMDB transaction, so the change commits or rolls back with the row.
+The changes of one root transaction carry its LMDB transaction id (nested
+transactions inherit it) as their `local_transaction_id`. `claim`, the push
+results, `apply_remote` and `resolve_conflict` are write transactions of
+their own, short, and never span the network.
 
 **Growth.** The memory map starts at `initial_map_size` (64 MiB by default)
 and is reserved address space, not disk space. When a write hits the current
@@ -339,9 +426,24 @@ The wire protocol spoken by `ofc_execute` is specified in db_dsl's
 - **Choose durability deliberately.** `full` (the default) survives a power
   loss; `no_meta_sync`/`no_sync` trade that guarantee for throughput and
   should be a conscious choice, not an accident.
+- **Sync: settle by mutation, never by row.** Build acknowledgements from
+  the envelopes the server confirmed (`Acknowledgement::of`), release a
+  lease when a push fails, and let conflicts reach `resolve_conflict`; do
+  not delete rows of a synchronized table to make the debt go away (a
+  deletion is a change too). Servers must deduplicate by `mutation_id`:
+  retries resend the same envelope.
 - **Open each path once per process** and share the handle (or rely on this
   crate's automatic sharing, see "Handles" above) — do not design around
   reopening a path to get a fresh connection.
+
+## Compatibility
+
+Within 0.7, the C ABI and the wire protocol (version 1) only grow: new
+operations and new optional fields, never a changed meaning. In the Rust
+API, `EngineError`, `SyncError` and `TableDef` are `#[non_exhaustive]` since
+0.7.5, so new error variants and table options can arrive in a patch
+release: match errors with a wildcard arm (or use `code()`), and build
+tables with `TableDef::new` and its builders.
 
 ## Options
 

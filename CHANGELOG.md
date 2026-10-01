@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.5] - 2026-10-01
+
+### Added
+- Offline-first sync inside the transaction (RFC-001 §13):
+  `TableDef::sync_with(remote)` records every effective write of the table
+  as an immutable change in the same LMDB transaction as the row, and
+  `Db::sync()` exposes `claim`, `apply_push_result`, `release`, `retry`,
+  `apply_remote`, `resolve_conflict`, `state_of`, `pending`, `conflicts`
+  and `status`. Acknowledgements settle one mutation and revision; one
+  change per row is in flight, in revision order, with its bytes, identity
+  and base version fixed; deletions keep a tombstone until acknowledged;
+  remote changes never echo back and become conflicts over pending local
+  changes; a page of remote changes and its checkpoint commit together.
+- Wire operations `sync_claim`, `sync_push_result`, `sync_release`,
+  `sync_retry`, `sync_apply_remote`, `sync_resolve`, `sync_state`,
+  `sync_pending`, `sync_conflicts` and `sync_status`, and the `sync` field
+  of a table definition (absent for local tables, so existing requests and
+  catalogs are unchanged).
+- `SyncError` (inside `EngineError::Sync`) with the stable codes
+  `SyncNotTracked`, `UnknownMutation`, `AcknowledgementMismatch`,
+  `StaleCheckpoint`, `ConflictNotFound`, `RowVersionMismatch`,
+  `MutationInFlight` and `TombstonePending`.
+- Tests: the invariants I1–I12 (`tests/sync.rs`), a reference model over 150
+  random sequences of 80 steps against a simulated server
+  (`tests/sync_model.rs`), and a killed writer and a full file system on a
+  synchronized table (`tests/processes.rs`).
+
+### Changed
+- `EngineError` and `TableDef` are `#[non_exhaustive]`: match errors with a
+  wildcard arm and build tables with `TableDef::new` and its builders (see
+  "Compatibility" in the README). The C ABI and the wire protocol are
+  unchanged for existing requests.
+- Dropping a synchronized table discards its sync records with it.
+
 ## [0.7.4] - 2026-10-01
 
 ### Changed
