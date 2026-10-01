@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-10-01
+
+### Added
+- `select`: `fields` (projection into nested output paths, `null` when
+  missing) and `distinct` (dedup by key encoding, keeping the first row).
+- `group` (new statement): `by`, aggregates (`count`, `count_of`, `sum`,
+  `avg`, `min`, `max`, each named by `as`), `having`, `order`, `limit`,
+  `offset`. Semantics match the `aggregate` statement (sum of integers stays
+  an integer unless it overflows `i64`, then `f64`; `null` groups form their
+  own group, as in SQL).
+- `join` (new statement): `from`/`joins` with aliases, `inner`/`left` kinds,
+  an equality condition (`on.left`/`on.right`), and combined rows addressed
+  by alias (`"u.name"`) in `filter` and `order`.
+- `update`: `increment`, adding a numeric delta to the current value of a
+  field (missing or `null` counts as `0`; two integers stay an integer;
+  otherwise a finite `f64`). A current value that is not a number, an `i64`
+  overflow or a sum that is not finite fails with `InvalidRequest` and
+  writes nothing.
+- Rust DSL: `Select::select`/`distinct`, `Query::group`/`Group`,
+  `Query::join`/`Join`, `Update::increment`.
+
+### Changed
+- Keys are limited to 511 bytes on every platform (`PROTOCOL_MAX_KEY_SIZE`) —
+  previously LMDB 1.0's page-size-dependent limit (about 2 KB with 4 KB
+  pages, 8 KB with the 16 KB pages of Apple Silicon), which made the same row
+  fit on some devices and not others.
+
 ## [0.6.2] - 2026-10-01
 
 ### Changed

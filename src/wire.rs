@@ -18,10 +18,12 @@
 //! | `savepoint`, `release`, `rollback_to`, `commit`, `rollback` | `transaction` | `{}` |
 //! | `info` | — | `{"map_size": n, "lmdb": "1.0.2", "tables": n}` |
 //!
-//! Statement results: `{"rows": [...]}` (select), `{"row": {...}|null}`
-//! (find), `{"count": n}`, `{"value": v}` (aggregate), and
-//! `{"affected": n, "rows": [...]}` for writes (`rows` holds inserted rows).
-//! Rows are sent as stored, without re-serialization.
+//! Statement results: `{"rows": [...]}` (`select`, `group`, `join`),
+//! `{"row": {...}|null}` (find), `{"count": n}`, `{"value": v}` (aggregate),
+//! and `{"affected": n, "rows": [...]}` for writes (`rows` holds inserted
+//! rows). A plain `select` (no `fields`/`distinct`) sends its rows as stored,
+//! without re-serialization; a projected `select`, `group` and `join` build
+//! new JSON objects, so their rows are freshly encoded instead.
 
 use std::sync::Arc;
 use std::time::Duration;

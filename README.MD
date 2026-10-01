@@ -5,12 +5,19 @@ A Diesel-style embedded database for Rust and Flutter, built on
 
 - **Diesel-style queries** — `filter`, `or_filter`, `order`, `then_order_by`,
   `limit`, `offset`, `find`, `first`, `count`, aggregates, `insert_into`,
-  `update(..).set(..)`, `delete`, `on_conflict`, with Diesel's operator names
-  (`eq`, `ne`, `gt`, `ge`, `lt`, `le`, `eq_any`, `ne_all`, `is_null`,
-  `between`, `like`, …).
-- **One executor for Rust and Dart** — the Rust builders and the Dart SDK
-  ([flutter_local_db](https://pub.dev/packages/flutter_local_db)) produce the
-  same intermediate representation; filtering, sorting and index lookups
+  `update(..).set(..)`, `update(..).increment(..)`, `delete`, `on_conflict`,
+  with Diesel's operator names (`eq`, `ne`, `gt`, `ge`, `lt`, `le`, `eq_any`,
+  `ne_all`, `is_null`, `between`, `like`, …).
+- **Projection, distinct, `group` and `join`** — `select(fields)` projects
+  nested output paths, `distinct()` dedups by key encoding; `Query::group`
+  aggregates (`count`, `sum`, `avg`, `min`, `max`) with `having`; `Query::join`
+  combines tables by equality (`inner`/`left`), addressed by alias in
+  `filter`/`order`.
+- **One executor for Rust and Dart** — the Rust builders and the Dart DSL
+  ([db_dsl](https://pub.dev/packages/db_dsl), used by
+  [flutter_local_db](https://pub.dev/packages/flutter_local_db) in apps and
+  [dart_db](https://pub.dev/packages/dart_db) on servers) produce the same
+  requests of one documented protocol; filtering, sorting and index lookups
   always run in Rust.
 - **Secondary indexes** (single, composite, unique) maintained in the same
   transaction as their rows, and a rule-based planner with `explain`.
@@ -25,7 +32,7 @@ A Diesel-style embedded database for Rust and Flutter, built on
 
 ```toml
 [dependencies]
-offline_first_core = "0.6"
+offline_first_core = "0.7"
 serde_json = "1"
 ```
 

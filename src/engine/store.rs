@@ -104,6 +104,14 @@ impl Table {
     }
 }
 
+/// Largest encoded key, in bytes, on every platform.
+///
+/// LMDB 1.0 derives its own limit from the page size (about 2 KB with 4 KB
+/// pages, 8 KB with the 16 KB pages of Apple Silicon). The protocol fixes 511
+/// bytes, the limit of LMDB 0.9 and of flutter_local_db 1.x, so the same rows
+/// fit on every device and server.
+pub const PROTOCOL_MAX_KEY_SIZE: usize = 511;
+
 /// Directories with an open [`Store`] in this process.
 static OPEN_DIRS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
@@ -173,13 +181,16 @@ impl Store {
         let legacy = env.create_db(Some(LEGACY_DB_NAME), DatabaseFlags::empty())?;
         let catalog = env.create_db(Some(CATALOG_DB_NAME), DatabaseFlags::empty())?;
         // SAFETY: `env.env()` is the open environment; the call only reads it.
-        let max_key_size = unsafe { natdb_sys::mdb_env_get_maxkeysize(env.env()) };
+        let lmdb_max_key_size = unsafe { natdb_sys::mdb_env_get_maxkeysize(env.env()) };
         let store = Self {
             env,
             legacy,
             catalog,
             tables: RwLock::new(HashMap::new()),
-            max_key_size: usize::try_from(max_key_size).unwrap_or(511),
+            max_key_size: usize::try_from(lmdb_max_key_size)
+                .map_or(PROTOCOL_MAX_KEY_SIZE, |lmdb| {
+                    lmdb.min(PROTOCOL_MAX_KEY_SIZE)
+                }),
             max_map_size: options.max_map_size.max(options.initial_map_size),
             needs_growth: AtomicBool::new(false),
             _dir: guard,
