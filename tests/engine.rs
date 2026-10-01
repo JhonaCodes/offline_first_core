@@ -706,3 +706,43 @@ fn test_relaxed_durability_still_persists_on_close() {
     let db = open(&dir, "db");
     assert_eq!(Query::table("t").count(&db).expect("count"), 1);
 }
+
+#[test]
+fn test_or_filter_and_offset_like_diesel() {
+    let dir = TestDir::new("or_filter_offset");
+    let db = open(&dir, "db");
+    db.define_table(TableDef::new("n", "id")).expect("define");
+    Query::insert_into(
+        "n",
+        (1..=10i64).map(|id| json!({"id": id, "even": id % 2 == 0})),
+    )
+    .execute(&db)
+    .expect("insert");
+
+    // `or_filter` ORs with everything so far: (id <= 2 AND even) OR id = 9.
+    let rows: Vec<Value> = Query::table("n")
+        .filter(col("id").le(2))
+        .filter(col("even").eq(true))
+        .or_filter(col("id").eq(9))
+        .order(col("id").asc())
+        .load(&db)
+        .expect("load");
+    let ids: Vec<i64> = rows
+        .iter()
+        .map(|row| row["id"].as_i64().expect("id"))
+        .collect();
+    assert_eq!(ids, [2, 9]);
+
+    // `offset` skips rows after the order, before the limit.
+    let page: Vec<Value> = Query::table("n")
+        .order(col("id").desc())
+        .offset(3)
+        .limit(2)
+        .load(&db)
+        .expect("page");
+    let ids: Vec<i64> = page
+        .iter()
+        .map(|row| row["id"].as_i64().expect("id"))
+        .collect();
+    assert_eq!(ids, [7, 6]);
+}

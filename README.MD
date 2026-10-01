@@ -194,6 +194,13 @@ let count = db.read_transaction(|snapshot| {
 })?;
 ```
 
+## Diesel conformance
+
+[docs/diesel-conformance.md](https://github.com/JhonaCodes/offline_first_core/blob/main/docs/diesel-conformance.md)
+maps every family of the Diesel 2.3 API to this engine and to db_dsl:
+implemented (with the test that proves it), partial, planned or not
+applicable.
+
 ## How it works
 
 **Storage.** One LMDB environment per opened directory. Every table and index
