@@ -48,3 +48,6 @@ thiserror = "2.0.21"
 # Apple targets, locks with pthread mutexes (the App Sandbox rejects semaphores).
 natdb = "0.1.1"
 natdb-sys = "0.1.1"
+
+[dev-dependencies]
+rusqlite = { version = "0.40.2", features = ["bundled"] }
