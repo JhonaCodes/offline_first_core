@@ -25,7 +25,10 @@ use serde_json::{Map, Value};
 
 use super::db::{decode_rows, Db};
 use super::error::EngineResult;
-use super::stmt::{Aggregate, Expr, OnConflict, OrderBy, Output, Select, Statement};
+use super::stmt::{
+    Aggregate, AggregateSpec, Expr, GroupFunction, GroupQuery, JoinKind, JoinOn, JoinQuery,
+    JoinSource, JoinStep, OnConflict, OrderBy, Output, Select, Statement,
+};
 use super::tx::WriteTx;
 
 /// A column (field path) used to build expressions.
@@ -180,6 +183,7 @@ impl Query {
             table: table.into(),
             filter: None,
             set: Map::new(),
+            increment: Map::new(),
             expect: None,
         }
     }
@@ -198,6 +202,35 @@ impl Query {
         Statement::Find {
             table: table.into(),
             key: key.into(),
+        }
+    }
+
+    /// `SELECT ... FROM table GROUP BY ...`.
+    pub fn group(table: impl Into<String>) -> Group {
+        Group {
+            table: table.into(),
+            filter: None,
+            by: Vec::new(),
+            aggregates: Vec::new(),
+            having: None,
+            order: Vec::new(),
+            limit: None,
+            offset: None,
+        }
+    }
+
+    /// `SELECT ... FROM table JOIN ...`.
+    pub fn join(table: impl Into<String>) -> Join {
+        Join {
+            from: JoinSource {
+                table: table.into(),
+                alias: None,
+            },
+            joins: Vec::new(),
+            filter: None,
+            order: Vec::new(),
+            limit: None,
+            offset: None,
         }
     }
 }
@@ -246,6 +279,20 @@ impl Select {
     /// Rows to skip.
     pub fn offset(mut self, offset: u64) -> Self {
         self.offset = Some(offset);
+        self
+    }
+
+    /// Projects only these field paths into each output row (nested paths
+    /// reach into the row, e.g. `"address.city"`); without it, whole rows.
+    pub fn select(mut self, fields: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.fields = fields.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Drops output rows equal to an earlier one (by key encoding), keeping
+    /// the first.
+    pub fn distinct(mut self) -> Self {
+        self.distinct = true;
         self
     }
 
@@ -298,6 +345,321 @@ impl Select {
 impl From<Select> for Statement {
     fn from(select: Select) -> Self {
         Statement::Select(select)
+    }
+}
+
+/// A `group` query under construction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Group {
+    table: String,
+    filter: Option<Expr>,
+    by: Vec<String>,
+    aggregates: Vec<AggregateSpec>,
+    having: Option<Expr>,
+    order: Vec<OrderBy>,
+    limit: Option<u64>,
+    offset: Option<u64>,
+}
+
+impl Group {
+    /// Adds a condition (`AND` with the previous ones), evaluated before
+    /// grouping.
+    pub fn filter(mut self, expr: Expr) -> Self {
+        self.filter = and_filter(self.filter.take(), expr);
+        self
+    }
+
+    /// Adds an alternative (`OR` with the conditions so far).
+    pub fn or_filter(mut self, expr: Expr) -> Self {
+        self.filter = Some(match self.filter.take() {
+            Some(current) => current.or(expr),
+            None => expr,
+        });
+        self
+    }
+
+    /// Adds `field` to the grouping key.
+    pub fn by(mut self, field: impl Into<String>) -> Self {
+        self.by.push(field.into());
+        self
+    }
+
+    /// Counts the rows of each group, as `alias`.
+    pub fn count(mut self, alias: impl Into<String>) -> Self {
+        self.aggregates.push(AggregateSpec {
+            function: GroupFunction::Count,
+            field: None,
+            alias: alias.into(),
+        });
+        self
+    }
+
+    /// Counts the rows of each group whose `field` is not `null`, as `alias`.
+    pub fn count_of(mut self, field: impl Into<String>, alias: impl Into<String>) -> Self {
+        self.aggregates.push(AggregateSpec {
+            function: GroupFunction::Count,
+            field: Some(field.into()),
+            alias: alias.into(),
+        });
+        self
+    }
+
+    /// Sums `field` over each group, as `alias`.
+    pub fn sum(self, field: impl Into<String>, alias: impl Into<String>) -> Self {
+        self.aggregate(GroupFunction::Sum, field, alias)
+    }
+
+    /// Averages `field` over each group, as `alias`.
+    pub fn avg(self, field: impl Into<String>, alias: impl Into<String>) -> Self {
+        self.aggregate(GroupFunction::Avg, field, alias)
+    }
+
+    /// Smallest `field` of each group (total order), as `alias`.
+    pub fn min(self, field: impl Into<String>, alias: impl Into<String>) -> Self {
+        self.aggregate(GroupFunction::Min, field, alias)
+    }
+
+    /// Largest `field` of each group (total order), as `alias`.
+    pub fn max(self, field: impl Into<String>, alias: impl Into<String>) -> Self {
+        self.aggregate(GroupFunction::Max, field, alias)
+    }
+
+    fn aggregate(
+        mut self,
+        function: GroupFunction,
+        field: impl Into<String>,
+        alias: impl Into<String>,
+    ) -> Self {
+        self.aggregates.push(AggregateSpec {
+            function,
+            field: Some(field.into()),
+            alias: alias.into(),
+        });
+        self
+    }
+
+    /// Drops output groups that do not match (`AND` with the previous ones).
+    /// Its fields are the `by` paths and the aggregate aliases.
+    pub fn having(mut self, expr: Expr) -> Self {
+        self.having = Some(match self.having.take() {
+            Some(current) => current.and(expr),
+            None => expr,
+        });
+        self
+    }
+
+    /// Replaces the sort keys.
+    pub fn order(mut self, key: OrderBy) -> Self {
+        self.order = vec![key];
+        self
+    }
+
+    /// Adds a sort key.
+    pub fn then_order_by(mut self, key: OrderBy) -> Self {
+        self.order.push(key);
+        self
+    }
+
+    /// Maximum number of groups.
+    pub fn limit(mut self, limit: u64) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Groups to skip.
+    pub fn offset(mut self, offset: u64) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+
+    /// Runs the query and deserializes the output rows.
+    pub fn load<T: DeserializeOwned>(&self, db: &Db) -> EngineResult<Vec<T>> {
+        decode_rows(&db.execute(&Statement::from(self.clone()))?)
+    }
+
+    /// Runs the query inside a transaction and deserializes the output rows.
+    pub fn load_in<T: DeserializeOwned>(&self, tx: &mut WriteTx<'_>) -> EngineResult<Vec<T>> {
+        decode_rows(&tx.execute(&Statement::from(self.clone()))?)
+    }
+}
+
+impl From<Group> for Statement {
+    fn from(group: Group) -> Self {
+        Statement::Group(GroupQuery {
+            table: group.table,
+            filter: group.filter,
+            by: group.by,
+            aggregates: group.aggregates,
+            having: group.having,
+            order: group.order,
+            limit: group.limit,
+            offset: group.offset,
+        })
+    }
+}
+
+/// A `join` query under construction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Join {
+    from: JoinSource,
+    joins: Vec<JoinStep>,
+    filter: Option<Expr>,
+    order: Vec<OrderBy>,
+    limit: Option<u64>,
+    offset: Option<u64>,
+}
+
+impl Join {
+    /// Alias of the `from` table in combined rows (defaults to its name).
+    pub fn alias(mut self, alias: impl Into<String>) -> Self {
+        self.from.alias = Some(alias.into());
+        self
+    }
+
+    /// Inner-joins `table` (aliased by its name) on `left = right`.
+    pub fn inner_join(
+        self,
+        table: impl Into<String>,
+        left: impl Into<String>,
+        right: impl Into<String>,
+    ) -> Self {
+        self.push_join(
+            table.into(),
+            None,
+            JoinKind::Inner,
+            left.into(),
+            right.into(),
+        )
+    }
+
+    /// Left-joins `table` (aliased by its name) on `left = right`.
+    pub fn left_join(
+        self,
+        table: impl Into<String>,
+        left: impl Into<String>,
+        right: impl Into<String>,
+    ) -> Self {
+        self.push_join(
+            table.into(),
+            None,
+            JoinKind::Left,
+            left.into(),
+            right.into(),
+        )
+    }
+
+    /// Inner-joins `table` (aliased `alias`) on `left = right`.
+    pub fn inner_join_as(
+        self,
+        table: impl Into<String>,
+        alias: impl Into<String>,
+        left: impl Into<String>,
+        right: impl Into<String>,
+    ) -> Self {
+        self.push_join(
+            table.into(),
+            Some(alias.into()),
+            JoinKind::Inner,
+            left.into(),
+            right.into(),
+        )
+    }
+
+    /// Left-joins `table` (aliased `alias`) on `left = right`.
+    pub fn left_join_as(
+        self,
+        table: impl Into<String>,
+        alias: impl Into<String>,
+        left: impl Into<String>,
+        right: impl Into<String>,
+    ) -> Self {
+        self.push_join(
+            table.into(),
+            Some(alias.into()),
+            JoinKind::Left,
+            left.into(),
+            right.into(),
+        )
+    }
+
+    fn push_join(
+        mut self,
+        table: String,
+        alias: Option<String>,
+        kind: JoinKind,
+        left: String,
+        right: String,
+    ) -> Self {
+        self.joins.push(JoinStep {
+            table,
+            alias,
+            kind,
+            on: JoinOn { left, right },
+        });
+        self
+    }
+
+    /// Adds a condition over the combined rows (`AND` with the previous
+    /// ones).
+    pub fn filter(mut self, expr: Expr) -> Self {
+        self.filter = and_filter(self.filter.take(), expr);
+        self
+    }
+
+    /// Adds an alternative (`OR` with the conditions so far).
+    pub fn or_filter(mut self, expr: Expr) -> Self {
+        self.filter = Some(match self.filter.take() {
+            Some(current) => current.or(expr),
+            None => expr,
+        });
+        self
+    }
+
+    /// Replaces the sort keys (paths reach into an alias, e.g. `"u.name"`).
+    pub fn order(mut self, key: OrderBy) -> Self {
+        self.order = vec![key];
+        self
+    }
+
+    /// Adds a sort key.
+    pub fn then_order_by(mut self, key: OrderBy) -> Self {
+        self.order.push(key);
+        self
+    }
+
+    /// Maximum number of combined rows.
+    pub fn limit(mut self, limit: u64) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Combined rows to skip.
+    pub fn offset(mut self, offset: u64) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+
+    /// Runs the query and deserializes the combined rows.
+    pub fn load<T: DeserializeOwned>(&self, db: &Db) -> EngineResult<Vec<T>> {
+        decode_rows(&db.execute(&Statement::from(self.clone()))?)
+    }
+
+    /// Runs the query inside a transaction and deserializes the combined rows.
+    pub fn load_in<T: DeserializeOwned>(&self, tx: &mut WriteTx<'_>) -> EngineResult<Vec<T>> {
+        decode_rows(&tx.execute(&Statement::from(self.clone()))?)
+    }
+}
+
+impl From<Join> for Statement {
+    fn from(join: Join) -> Self {
+        Statement::Join(JoinQuery {
+            from: join.from,
+            joins: join.joins,
+            filter: join.filter,
+            order: join.order,
+            limit: join.limit,
+            offset: join.offset,
+        })
     }
 }
 
@@ -361,6 +723,7 @@ pub struct Update {
     table: String,
     filter: Option<Expr>,
     set: Map<String, Value>,
+    increment: Map<String, Value>,
     expect: Option<u64>,
 }
 
@@ -374,6 +737,13 @@ impl Update {
     /// Sets `field` to `value`.
     pub fn set(mut self, field: impl Into<String>, value: impl Into<Value>) -> Self {
         self.set.insert(field.into(), value.into());
+        self
+    }
+
+    /// Adds `delta` to the current value of `field` (missing or `null` counts
+    /// as `0`); disjoint from `set` and from the primary key.
+    pub fn increment(mut self, field: impl Into<String>, delta: impl Into<Value>) -> Self {
+        self.increment.insert(field.into(), delta.into());
         self
     }
 
@@ -400,6 +770,7 @@ impl From<Update> for Statement {
             table: update.table,
             filter: update.filter,
             set: update.set,
+            increment: update.increment,
             expect: update.expect,
         }
     }

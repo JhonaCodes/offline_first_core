@@ -1,7 +1,7 @@
 [package]
 name = "offline_first_core"
 repository = "https://github.com/JhonaCodes/offline_first_core"
-version = "0.6.2"
+version = "0.7.0"
 edition = "2021"
 license = "MIT"
 description = "Diesel-style embedded database on LMDB 1.0 (natdb): tables, secondary indexes, transactions and a C ABI for Flutter"

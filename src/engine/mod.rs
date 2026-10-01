@@ -25,9 +25,12 @@ pub(crate) mod tx;
 pub mod value;
 
 pub use db::{decode_rows, Db};
-pub use dsl::{col, Col, Delete, Insert, Query, Update};
+pub use dsl::{col, Col, Delete, Group, Insert, Join, Query, Update};
 pub use error::{EngineError, EngineResult};
 pub use schema::{IndexDef, TableDef};
-pub use stmt::{Aggregate, Expr, OnConflict, OrderBy, Output, Select, Statement};
+pub use stmt::{
+    Aggregate, AggregateSpec, Expr, GroupFunction, GroupQuery, JoinKind, JoinOn, JoinQuery,
+    JoinSource, JoinStep, OnConflict, OrderBy, Output, Select, Statement,
+};
 pub use store::{Durability, OpenOptions, Store};
 pub use tx::{ReadTx, WriteTx};

@@ -38,7 +38,9 @@ pub enum Mode {
 type Reply<T> = SyncSender<EngineResult<T>>;
 
 enum Request {
-    Execute(Statement, Reply<Output>),
+    // Boxed: `Statement` grew with `group`/`join`/projection, and clippy's
+    // `large_enum_variant` flags the gap against the other (tiny) variants.
+    Execute(Box<Statement>, Reply<Output>),
     Savepoint(Reply<()>),
     Release(Reply<()>),
     RollbackTo(Reply<()>),
@@ -133,7 +135,9 @@ pub(crate) fn execute(
     id: u64,
     statement: Statement,
 ) -> EngineResult<Output> {
-    call(shared, id, |reply| Request::Execute(statement, reply))
+    call(shared, id, |reply| {
+        Request::Execute(Box::new(statement), reply)
+    })
 }
 
 /// Opens a savepoint in the session `id`.

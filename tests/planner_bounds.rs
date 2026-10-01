@@ -230,3 +230,47 @@ fn test_negative_zero_equals_zero_with_and_without_an_index() {
         assert_eq!(loaded_ids(&db, &below), Vec::<i64>::new(), "{field} < 0");
     }
 }
+
+#[test]
+fn test_keys_are_limited_to_511_bytes_on_every_platform() {
+    // LMDB 1.0 derives its own limit from the page size (about 2 KB with 4 KB
+    // pages, 8 KB with the 16 KB pages of Apple Silicon); the protocol fixes
+    // 511 bytes so the same rows fit on every device and server.
+    let dir = TestDir::new("bounds_key_limit");
+    let db = Db::open(dir.db_dir("db")).expect("open");
+    db.define_table(TableDef::new("keys", "id").index("by_label", &["label"]))
+        .expect("define");
+
+    let long = "x".repeat(600);
+    let key = Query::insert_into("keys", [json!({"id": long.clone()})]).execute(&db);
+    assert!(
+        matches!(
+            key,
+            Err(offline_first_core::engine::EngineError::KeyTooLarge { .. })
+        ),
+        "{key:?}"
+    );
+    let label = Query::insert_into("keys", [json!({"id": "ok", "label": long})]).execute(&db);
+    assert!(
+        matches!(
+            label,
+            Err(offline_first_core::engine::EngineError::KeyTooLarge { .. })
+        ),
+        "{label:?}"
+    );
+    // 508 bytes of text encode to 511 (tag + text + terminator): accepted in
+    // a table without indexes. An index key also carries the primary key, so
+    // `keys` above would reject it.
+    db.define_table(TableDef::new("plain", "id"))
+        .expect("define plain");
+    let fits = Query::insert_into("plain", [json!({"id": "y".repeat(508)})]).execute(&db);
+    assert!(fits.is_ok(), "{fits:?}");
+    let over = Query::insert_into("plain", [json!({"id": "y".repeat(509)})]).execute(&db);
+    assert!(
+        matches!(
+            over,
+            Err(offline_first_core::engine::EngineError::KeyTooLarge { .. })
+        ),
+        "{over:?}"
+    );
+}

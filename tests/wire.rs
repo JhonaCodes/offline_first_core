@@ -287,3 +287,173 @@ fn test_read_snapshot_and_foreign_transactions() {
     );
     db.ok(json!({"v": 1, "op": "commit", "transaction": snapshot}));
 }
+
+fn people(db: &Wire) {
+    db.ok(json!({"v": 1, "op": "define_table", "table": {
+        "name": "people", "primary_key": "id"
+    }}));
+    db.ok(
+        json!({"v": 1, "op": "execute", "statement": {"op": "insert", "table": "people", "rows": [
+            {"id": 1, "city": "Bogota", "meta": {"stars": 3}},
+            {"id": 2, "city": "Bogota", "meta": {"stars": 5}},
+            {"id": 3, "city": "Lima", "meta": {"stars": 1}}
+        ]}}),
+    );
+}
+
+#[test]
+fn test_select_projection_and_distinct_over_the_wire() {
+    let dir = TestDir::new("wire_projection");
+    let db = Wire::open(&dir, "db");
+    people(&db);
+
+    let projected = db.ok(json!({"v": 1, "op": "execute", "statement": {
+        "op": "select", "table": "people", "fields": ["city", "meta.stars"],
+        "order": [{"field": "id"}]
+    }}));
+    assert_eq!(
+        projected["rows"],
+        json!([
+            {"city": "Bogota", "meta": {"stars": 3}},
+            {"city": "Bogota", "meta": {"stars": 5}},
+            {"city": "Lima", "meta": {"stars": 1}}
+        ])
+    );
+
+    let distinct = db.ok(json!({"v": 1, "op": "execute", "statement": {
+        "op": "select", "table": "people", "fields": ["city"], "distinct": true,
+        "order": [{"field": "id"}]
+    }}));
+    assert_eq!(
+        distinct["rows"],
+        json!([{"city": "Bogota"}, {"city": "Lima"}])
+    );
+
+    // An empty projected path is `InvalidRequest`, same as the Rust API.
+    assert_eq!(
+        db.error_code(json!({"v": 1, "op": "execute", "statement": {
+            "op": "select", "table": "people", "fields": [""]
+        }})),
+        "InvalidRequest"
+    );
+}
+
+#[test]
+fn test_group_statement_over_the_wire() {
+    let dir = TestDir::new("wire_group");
+    let db = Wire::open(&dir, "db");
+    people(&db);
+
+    let grouped = db.ok(json!({"v": 1, "op": "execute", "statement": {
+        "op": "group", "table": "people", "by": ["city"],
+        "aggregates": [
+            {"function": "count", "as": "total"},
+            {"function": "sum", "field": "meta.stars", "as": "stars"}
+        ],
+        "order": [{"field": "city"}]
+    }}));
+    assert_eq!(
+        grouped["rows"],
+        json!([
+            {"city": "Bogota", "total": 2, "stars": 8},
+            {"city": "Lima", "total": 1, "stars": 1}
+        ])
+    );
+
+    // An unknown aggregate function does not deserialize: `InvalidRequest`.
+    assert_eq!(
+        db.error_code(json!({"v": 1, "op": "execute", "statement": {
+            "op": "group", "table": "people", "by": ["city"],
+            "aggregates": [{"function": "median", "field": "meta.stars", "as": "m"}]
+        }})),
+        "InvalidRequest"
+    );
+}
+
+#[test]
+fn test_join_statement_over_the_wire() {
+    let dir = TestDir::new("wire_join");
+    let db = Wire::open(&dir, "db");
+    db.ok(json!({"v": 1, "op": "define_table", "table": {"name": "users", "primary_key": "id"}}));
+    db.ok(json!({"v": 1, "op": "define_table", "table": {"name": "posts", "primary_key": "id"}}));
+    db.ok(
+        json!({"v": 1, "op": "execute", "statement": {"op": "insert", "table": "users", "rows": [
+            {"id": 1, "name": "ana"}, {"id": 2, "name": "bob"}
+        ]}}),
+    );
+    db.ok(
+        json!({"v": 1, "op": "execute", "statement": {"op": "insert", "table": "posts", "rows": [
+            {"id": 10, "author_id": 1, "title": "p1"}
+        ]}}),
+    );
+
+    let joined = db.ok(json!({"v": 1, "op": "execute", "statement": {
+        "op": "join",
+        "from": {"table": "users", "as": "u"},
+        "joins": [{"table": "posts", "as": "p", "kind": "left",
+                   "on": {"left": "u.id", "right": "author_id"}}],
+        "order": [{"field": "u.id"}]
+    }}));
+    assert_eq!(
+        joined["rows"],
+        json!([
+            {"u": {"id": 1, "name": "ana"}, "p": {"id": 10, "author_id": 1, "title": "p1"}},
+            {"u": {"id": 2, "name": "bob"}, "p": null}
+        ])
+    );
+
+    // An unknown join kind does not deserialize: `InvalidRequest`.
+    assert_eq!(
+        db.error_code(json!({"v": 1, "op": "execute", "statement": {
+            "op": "join", "from": {"table": "users"},
+            "joins": [{"table": "posts", "kind": "outer", "on": {"left": "id", "right": "author_id"}}]
+        }})),
+        "InvalidRequest"
+    );
+    assert_eq!(
+        db.error_code(json!({"v": 1, "op": "execute", "statement": {
+            "op": "join", "from": {"table": "missing"}
+        }})),
+        "TableNotFound"
+    );
+}
+
+#[test]
+fn test_update_increment_over_the_wire() {
+    let dir = TestDir::new("wire_increment");
+    let db = Wire::open(&dir, "db");
+    db.ok(json!({"v": 1, "op": "define_table", "table": {"name": "pages", "primary_key": "id"}}));
+    db.ok(json!({"v": 1, "op": "execute", "statement": {
+        "op": "insert", "table": "pages", "rows": [{"id": 1, "views": 10}]
+    }}));
+
+    let updated = db.ok(json!({"v": 1, "op": "execute", "statement": {
+        "op": "update", "table": "pages",
+        "filter": {"op": "eq", "field": "id", "value": 1},
+        "increment": {"views": 5, "score": 0.5}
+    }}));
+    assert_eq!(updated["affected"], 1);
+
+    let row = db.ok(
+        json!({"v": 1, "op": "execute", "statement": {"op": "find", "table": "pages", "key": 1}}),
+    );
+    assert_eq!(row["row"]["views"], 15);
+    assert_eq!(row["row"]["score"], 0.5);
+
+    // `increment` and `set` on the same path is `InvalidRequest`, nothing written.
+    assert_eq!(
+        db.error_code(json!({"v": 1, "op": "execute", "statement": {
+            "op": "update", "table": "pages",
+            "filter": {"op": "eq", "field": "id", "value": 1},
+            "set": {"views": 100}, "increment": {"views": 1}
+        }})),
+        "InvalidRequest"
+    );
+    let unchanged = db.ok(
+        json!({"v": 1, "op": "execute", "statement": {"op": "find", "table": "pages", "key": 1}}),
+    );
+    assert_eq!(
+        unchanged["row"]["views"], 15,
+        "the failed update wrote nothing"
+    );
+}

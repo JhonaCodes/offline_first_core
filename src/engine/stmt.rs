@@ -255,6 +255,151 @@ pub struct Select {
     /// Rows skipped before the first returned one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<u64>,
+    /// Paths projected into each output row (empty: whole rows). Nested paths
+    /// (`"meta.stars"`) are placed at the same path in the output, `null`
+    /// when missing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<String>,
+    /// Drops output rows equal (by key encoding) to an earlier one, keeping
+    /// the first. Compares `fields` values, or whole rows without `fields`.
+    #[serde(default)]
+    pub distinct: bool,
+}
+
+/// Aggregate functions available to [`Statement::Group`] (a superset of
+/// [`Aggregate`]: it adds `count`, which has no per-row field of its own).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupFunction {
+    /// Rows of the group (no `field`), or rows whose value at `field` is not
+    /// `null` (with `field`).
+    Count,
+    /// Sum of the numeric values; `null` over no value.
+    Sum,
+    /// Average of the numeric values; `null` over no value.
+    Avg,
+    /// Smallest value in total order; `null` over no value.
+    Min,
+    /// Largest value in total order; `null` over no value.
+    Max,
+}
+
+/// One aggregate of a [`Statement::Group`], named by `as`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AggregateSpec {
+    /// Function to apply.
+    pub function: GroupFunction,
+    /// Aggregated field; required for every function but `count`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// Name of the output field. Non-empty, without `.`, unique among the
+    /// aggregates, and different from the first segment of every `by` path.
+    #[serde(rename = "as")]
+    pub alias: String,
+}
+
+/// The `from` table of a [`Statement::Join`], or one of its `joins`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinSource {
+    /// Table name.
+    pub table: String,
+    /// Alias combined rows use for this table; defaults to `table`. Must be
+    /// non-empty, without `.`, and unique among the sources of the join.
+    #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+}
+
+/// The equality condition of one join step: `<combined row>.left = <joined
+/// table>.right`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinOn {
+    /// Path into the combined row built so far.
+    pub left: String,
+    /// Path into the joined table's rows.
+    pub right: String,
+}
+
+/// How a join step treats a combined row with no match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinKind {
+    /// Drop the combined row.
+    Inner,
+    /// Keep it, with `null` for the joined table.
+    Left,
+}
+
+/// One step of a [`Statement::Join`]: joins `table` onto the combined rows
+/// built so far.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinStep {
+    /// Table to join.
+    pub table: String,
+    /// Alias combined rows use for this table; defaults to `table`.
+    #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    /// Inner or left.
+    pub kind: JoinKind,
+    /// Equality condition.
+    pub on: JoinOn,
+}
+
+/// Fields of [`Statement::Group`]. A dedicated struct (like [`Select`]),
+/// since `group` alone would push the executor past the function-argument
+/// limit clippy enforces, and it doubles as the wire form of the query.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GroupQuery {
+    /// Table name.
+    pub table: String,
+    /// Rows must match this expression.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<Expr>,
+    /// Paths whose values define each group (missing is `null`; empty: one
+    /// group over all matching rows).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by: Vec<String>,
+    /// Aggregates computed per group.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aggregates: Vec<AggregateSpec>,
+    /// Drops output rows (their fields are the `by` paths and the aggregate
+    /// aliases) that do not match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub having: Option<Expr>,
+    /// Sort keys over the output rows; without them, ascending by the key
+    /// encoding of the `by` values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<OrderBy>,
+    /// Maximum number of groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    /// Groups skipped before the first returned one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+}
+
+/// Fields of [`Statement::Join`]. A dedicated struct for the same reason as
+/// [`GroupQuery`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JoinQuery {
+    /// The table every combined row starts from.
+    pub from: JoinSource,
+    /// Joins applied in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub joins: Vec<JoinStep>,
+    /// Combined rows must match this expression (paths reach into an alias,
+    /// e.g. `"u.name"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<Expr>,
+    /// Sort keys over the combined rows; without them, the order the joins
+    /// were built in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<OrderBy>,
+    /// Maximum number of rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    /// Rows skipped before the first returned one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
 }
 
 /// Aggregate functions.
@@ -317,6 +462,10 @@ pub enum Statement {
         /// Primary key.
         key: Value,
     },
+    /// Groups matching rows and aggregates each group.
+    Group(GroupQuery),
+    /// Joins one or more tables by equality and returns the combined rows.
+    Join(JoinQuery),
     /// Inserts rows (`insert_into(...).values(...)`).
     Insert {
         /// Table name.
@@ -335,7 +484,13 @@ pub enum Statement {
         #[serde(default)]
         filter: Option<Expr>,
         /// New values by field path (the primary key cannot change).
+        #[serde(default)]
         set: Map<String, Value>,
+        /// Numeric deltas by field path, added to the current value (missing
+        /// or `null` counts as `0`). Disjoint from `set` and from the primary
+        /// key.
+        #[serde(default)]
+        increment: Map<String, Value>,
         /// Fail unless exactly this many rows are updated.
         #[serde(default)]
         expect: Option<u64>,
@@ -362,16 +517,18 @@ impl Statement {
         )
     }
 
-    /// The table the statement reads or writes.
+    /// The table the statement reads or writes. For `join`, the `from` table.
     pub fn table(&self) -> &str {
         match self {
             Self::Select(select) => &select.table,
+            Self::Group(query) => &query.table,
             Self::Count { table, .. }
             | Self::Aggregate { table, .. }
             | Self::Find { table, .. }
             | Self::Insert { table, .. }
             | Self::Update { table, .. }
             | Self::Delete { table, .. } => table,
+            Self::Join(query) => &query.from.table,
         }
     }
 }
