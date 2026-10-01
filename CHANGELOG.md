@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-10-01
+
+### Changed
+- Rewrote the documentation (`README.MD` and the crate-level rustdoc of
+  `src/lib.rs`) against the current code: what the engine does, how storage,
+  key encoding, the planner, transactions and the C ABI panic boundary work,
+  and how the database should be used (grouping writes, indexing what is
+  filtered or ordered, key size, durability, interactive transaction
+  lifetime). No behavior change.
+
 ## [0.7.0] - 2026-10-01
 
 ### Added

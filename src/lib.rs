@@ -1,18 +1,24 @@
-//! # Offline First Core
+//! # offline_first_core
 //!
-//! A high-performance local storage library designed for FFI (Foreign Function Interface)
-//! integration with Flutter and other cross-platform applications. Built on LMDB
-//! (Lightning Memory-Mapped Database) for maximum stability and hot restart support.
+//! A Diesel-style embedded database for Rust and Flutter, built on **LMDB
+//! 1.0.2** through [natdb](https://crates.io/crates/natdb). Two APIs share one
+//! LMDB environment per opened path:
 //!
-//! ## Features
+//! - [`engine`]: tables of JSON rows with a primary key and secondary
+//!   indexes, Diesel-style query builders ([`engine::Query`], [`engine::col`],
+//!   [`engine::Db`]), transactions with savepoints, and the JSON wire protocol
+//!   (see [`wire`]) served by [`ofc_execute`] for the Dart SDKs.
+//! - The key-value API of 0.5.0 ([`create_db`], [`push_data`], [`get_by_id`],
+//!   [`get_all`], [`update_data`], [`delete_by_id`], [`clear_all_records`],
+//!   [`reset_database`], [`close_database`]), unchanged since that release.
 //!
-//! - **LMDB-based storage**: Battle-tested database engine used by OpenLDAP and Bitcoin Core
-//! - **FFI-optimized**: Designed specifically for Flutter integration with hot restart support
-//! - **ACID compliance**: Full transaction support with data integrity guarantees
-//! - **Zero-copy reads**: Memory-mapped access for optimal performance
-//! - **Safe error handling**: No `unwrap()` calls in production code
+//! The [README](https://github.com/JhonaCodes/offline_first_core#readme) is
+//! the full guide: Rust usage of the query engine (`group`, `join`,
+//! projection, `explain`, transactions), how storage, key encoding, the
+//! planner, transactions and panic containment work, the complete C ABI
+//! symbol table, and the practical rules for using the database correctly.
 //!
-//! ## Quick Start
+//! ## Quick Start (key-value API)
 //!
 //! ```no_run
 //! use offline_first_core::{close_database, create_db, ofc_free_string, push_data};
@@ -32,42 +38,35 @@
 //! unsafe { ofc_free_string(result.cast_mut()) };
 //! ```
 //!
-//! ## FFI Functions
-//!
-//! This library exposes C-compatible functions for cross-language integration:
-//!
-//! - [`create_db`] - Open a database and return a handle to it
-//! - [`push_data`] - Insert new records
-//! - [`get_by_id`] - Retrieve records by ID
-//! - [`get_all`] - Retrieve all records
-//! - [`update_data`] - Update existing records
-//! - [`delete_by_id`] - Delete records by ID
-//! - [`clear_all_records`] - Clear all database contents
-//! - [`reset_database`] - Reset database to clean state
-//! - [`close_database`] - Release a handle
-//! - [`ofc_free_string`] - Release a response string
+//! For the query engine from Rust, see [`engine::Db`] and the README's "Rust"
+//! section.
 //!
 //! ## Contract of the C ABI
 //!
-//! - **Responses**: every function except [`create_db`] and
-//!   [`ofc_free_string`] returns a JSON envelope `{"<Variant>": "<payload>"}`
-//!   (`Ok`, `NotFound`, `DatabaseError`, `SerializationError`,
-//!   `ValidationError` or `BadRequest`). The string is owned by the caller and
-//!   must be released with [`ofc_free_string`], exactly once; it must not be
-//!   released with the C `free`.
-//! - **Handles**: [`create_db`] returns an opaque [`DbHandle`] pointer. Each
-//!   call returns its own handle, and handles opened on the same path share a
-//!   single database, so opening a path twice (several isolates, a Flutter hot
-//!   restart that lost its pointer) works and sees the same data. A handle may
-//!   be used from several threads at once. [`close_database`] releases a
-//!   handle; the database closes with its last handle.
+//! - **Responses** of the key-value API ([`create_db`], [`push_data`],
+//!   [`get_by_id`], [`get_all`], [`update_data`], [`delete_by_id`],
+//!   [`clear_all_records`], [`reset_database`], [`close_database`]): every one
+//!   of them except [`create_db`] returns a JSON envelope
+//!   `{"<Variant>": "<payload>"}` (`Ok`, `NotFound`, `DatabaseError`,
+//!   `SerializationError`, `ValidationError` or `BadRequest`), owned by the
+//!   caller and released with [`ofc_free_string`], exactly once, never with
+//!   the C `free`. [`ofc_open`] and [`ofc_execute`] answer a different
+//!   envelope instead, the wire protocol described in [`wire`] and in the
+//!   README's "C ABI / Dart" section.
+//! - **Handles**: [`create_db`] and [`ofc_open`] each return an opaque
+//!   [`DbHandle`] pointer. Every call returns its own handle, and handles
+//!   opened on the same path share a single database, so opening a path twice
+//!   (several isolates, a Flutter hot restart that lost its pointer) works
+//!   and sees the same data. A handle may be used from several threads at
+//!   once. [`close_database`] releases a handle; the database closes with its
+//!   last handle.
 //! - **Paths** are used exactly as given, with `.lmdb` appended. Relative
 //!   paths resolve against the working directory of the process, so callers
 //!   should pass absolute paths.
-//! - **Panics** never cross the boundary: an internal panic is logged and
-//!   answered with `{"DatabaseError": "internal panic in <function>: <message>"}`
-//!   (a null handle for [`create_db`]). This relies on `panic = "unwind"`,
-//!   which the release profile sets.
+//! - **Panics** never cross the boundary, in any entry point: an internal
+//!   panic is logged and turned into an error response (a null handle for
+//!   [`create_db`]) instead of unwinding across the `extern "C"` boundary.
+//!   This relies on `panic = "unwind"`, which the release profile sets.
 //! - **Pointer arguments** of the entry points are not checked beyond null,
 //!   so every entry point is an `unsafe extern "C" fn`: passing anything else
 //!   than what its `# Safety` section allows is undefined behavior. `unsafe`
@@ -76,11 +75,12 @@
 //! ## Naming of new symbols
 //!
 //! New exported symbols use the `ofc_` prefix (for *offline first core*), as
-//! [`ofc_free_string`] does. On iOS the library is linked statically into the
-//! app, where every exported symbol shares the process's global namespace
-//! (Dart looks them up with `DynamicLibrary.process()`), so generic names such
-//! as `free_string` could collide with other libraries. The nine original
-//! symbols keep their names for compatibility.
+//! [`ofc_open`], [`ofc_execute`] and [`ofc_free_string`] do. On iOS the
+//! library is linked statically into the app, where every exported symbol
+//! shares the process's global namespace (Dart looks them up with
+//! `DynamicLibrary.process()`), so generic names such as `free_string` could
+//! collide with other libraries. The nine original key-value symbols keep
+//! their names for compatibility.
 //!
 //! ## Cargo features
 //!
