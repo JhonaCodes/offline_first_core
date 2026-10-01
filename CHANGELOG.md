@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.4] - 2026-10-01
+
+### Changed
+- `eq_any` on the primary key looks up only the keys it names, and on the
+  leading field of an index scans one index range per value, when no `eq`
+  or range plan applies; it was a full scan. Repeated values are visited
+  once, `null` and composite values keep the full scan, and every row is
+  checked against the whole filter, so results do not change.
+  `explain` answers `primary_key_lookup` or `index_scan` for them. This is
+  what makes db_dsl's `belongingTo` read only the children it asks for.
+
 ## [0.7.3] - 2026-10-01
 
 ### Added

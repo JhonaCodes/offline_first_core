@@ -48,6 +48,19 @@ fn scan<T: Transaction>(
             Err(natdb::Error::NotFound) => Ok(()),
             Err(e) => Err(e.into()),
         },
+        Access::PkPoints(keys) => {
+            for key in keys {
+                let more = match txn.get(table.db, key) {
+                    Ok(row) => visit(key, row)?,
+                    Err(natdb::Error::NotFound) => true,
+                    Err(e) => return Err(e.into()),
+                };
+                if !more {
+                    break;
+                }
+            }
+            Ok(())
+        }
         Access::Table { lower, upper } => walk(
             txn,
             table.db,
@@ -57,6 +70,23 @@ fn scan<T: Transaction>(
             plan.desc,
             |key, row| visit(key, row),
         ),
+        Access::IndexPoints { index, prefixes } => {
+            let index = table
+                .indexes
+                .get(*index)
+                .ok_or_else(|| EngineError::InvalidRequest("unknown index".to_string()))?;
+            let mut more = true;
+            for prefix in prefixes {
+                walk(txn, index.db, prefix, None, None, false, |_, pk| {
+                    more = visit_indexed(txn, table, index, fetch, pk, &mut visit)?;
+                    Ok(more)
+                })?;
+                if !more {
+                    break;
+                }
+            }
+            Ok(())
+        }
         Access::Index {
             index,
             prefix,
@@ -74,22 +104,33 @@ fn scan<T: Transaction>(
                 lower.as_deref(),
                 upper.as_deref(),
                 plan.desc,
-                |_, pk| {
-                    if !fetch {
-                        return visit(pk, &[]);
-                    }
-                    match txn.get(table.db, &pk) {
-                        Ok(row) => visit(pk, row),
-                        // An index entry always has its row; tolerate nothing else.
-                        Err(natdb::Error::NotFound) => Err(EngineError::CorruptRecord {
-                            table: table.def.name.clone(),
-                            detail: format!("index `{}` points to a missing row", index.def.name),
-                        }),
-                        Err(e) => Err(e.into()),
-                    }
-                },
+                |_, pk| visit_indexed(txn, table, index, fetch, pk, &mut visit),
             )
         }
+    }
+}
+
+/// Visits the row an index entry points to (or only its primary key,
+/// without `fetch`).
+fn visit_indexed<T: Transaction>(
+    txn: &T,
+    table: &Table,
+    index: &Index,
+    fetch: bool,
+    pk: &[u8],
+    visit: &mut impl FnMut(&[u8], &[u8]) -> EngineResult<bool>,
+) -> EngineResult<bool> {
+    if !fetch {
+        return visit(pk, &[]);
+    }
+    match txn.get(table.db, &pk) {
+        Ok(row) => visit(pk, row),
+        // An index entry always has its row; tolerate nothing else.
+        Err(natdb::Error::NotFound) => Err(EngineError::CorruptRecord {
+            table: table.def.name.clone(),
+            detail: format!("index `{}` points to a missing row", index.def.name),
+        }),
+        Err(e) => Err(e.into()),
     }
 }
 

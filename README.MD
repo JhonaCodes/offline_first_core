@@ -221,7 +221,10 @@ scan otherwise. A plan is **exact** when the keys it visits already satisfy
 the whole filter: rows are not re-checked, and a `count` does not read a
 single row. A non-exact plan still returns the right rows — every visited row
 is checked against the full filter — it just reads more of them than
-necessary.
+necessary. An `eq_any` on the primary key, or on the leading field of an index,
+looks up only the keys it names (one point or one index range per value)
+when nothing better applies, instead of a full scan; those rows are checked
+against the whole filter.
 
 **Joins.** A join reads each of its tables in full; every step builds a
 hash of the joined table by its `on.right` field and probes it with the

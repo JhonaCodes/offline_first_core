@@ -44,6 +44,16 @@ pub enum Access {
         /// First key past the end (exclusive).
         upper: Option<Vec<u8>>,
     },
+    /// Several primary keys, ascending and without repeats (`eq_any`).
+    PkPoints(Vec<Vec<u8>>),
+    /// An index: keys starting with each of `prefixes` (one leading value
+    /// each, ascending and without repeats; `eq_any`).
+    IndexPoints {
+        /// Position of the index in the table definition.
+        index: usize,
+        /// Encoded values of the leading field.
+        prefixes: Vec<Vec<u8>>,
+    },
     /// An index: keys starting with `prefix`, within optional bounds.
     Index {
         /// Position of the index in the table definition.
@@ -74,7 +84,11 @@ impl Plan {
     /// Description of the plan (`explain`).
     pub fn explain(&self, table: &Table) -> Value {
         let (access, index) = match &self.access {
-            Access::PkPoint(_) => ("primary_key_lookup", None),
+            Access::PkPoint(_) | Access::PkPoints(_) => ("primary_key_lookup", None),
+            Access::IndexPoints { index, .. } => (
+                "index_scan",
+                table.indexes.get(*index).map(|i| i.def.name.clone()),
+            ),
             Access::Table { lower, upper } if lower.is_some() || upper.is_some() => {
                 ("primary_key_range", None)
             }
@@ -283,6 +297,28 @@ fn bounds(prefix: &[u8], range: &Range<'_>) -> (Option<Vec<u8>>, Option<Vec<u8>>
     (lower, upper)
 }
 
+/// The field and the encoded keys of the first top-level `eq_any` of
+/// `filter` whose values are all scalars (not `null`), ascending and without
+/// repeats; `None` when there is none. A `null` matches no row, and a
+/// composite value no scalar field, so such a list is left to a full scan.
+fn eq_any_keys(filter: Option<&Expr>) -> Option<(&str, Vec<Vec<u8>>)> {
+    let mut parts = Vec::new();
+    if let Some(filter) = filter {
+        conjuncts(filter, &mut parts);
+    }
+    parts.into_iter().find_map(|part| match part {
+        Expr::EqAny { field, values }
+            if !values.is_empty() && values.iter().all(|v| is_scalar(v) && !v.is_null()) =>
+        {
+            let mut keys: Vec<Vec<u8>> = values.iter().map(encode_key).collect();
+            keys.sort_unstable();
+            keys.dedup();
+            Some((field.as_str(), keys))
+        }
+        _ => None,
+    })
+}
+
 /// Chooses how to visit the rows of `table` for `filter` and `order`.
 pub fn choose(table: &Table, filter: Option<&Expr>, order: &[OrderBy]) -> Plan {
     let constraints = Constraints::of(filter);
@@ -371,7 +407,35 @@ pub fn choose(table: &Table, filter: Option<&Expr>, order: &[OrderBy]) -> Plan {
         return plan;
     }
 
-    // 3. An index that provides the order (top-k).
+    // 3. `eq_any` on the primary key or on the leading field of an index:
+    // only the named keys, instead of a full scan. Rows are checked again.
+    if let Some((field, keys)) = eq_any_keys(filter) {
+        if field == pk {
+            return Plan {
+                access: Access::PkPoints(keys),
+                desc: false,
+                ordered: free_order.is_empty() || (follows(&[pk.to_string()]) && !desc),
+                exact: false,
+            };
+        }
+        let leading = table
+            .indexes
+            .iter()
+            .position(|index| index.def.fields.first().is_some_and(|f| f == field));
+        if let Some(position) = leading {
+            return Plan {
+                access: Access::IndexPoints {
+                    index: position,
+                    prefixes: keys,
+                },
+                desc: false,
+                ordered: free_order.is_empty(),
+                exact: false,
+            };
+        }
+    }
+
+    // 4. An index that provides the order (top-k).
     if !free_order.is_empty() {
         if follows(&[pk.to_string()]) {
             return Plan {
@@ -401,7 +465,7 @@ pub fn choose(table: &Table, filter: Option<&Expr>, order: &[OrderBy]) -> Plan {
         }
     }
 
-    // 4. Full scan.
+    // 5. Full scan.
     Plan {
         access: Access::Table {
             lower: None,
