@@ -109,6 +109,21 @@ assert_eq!(plan["access"], "index_scan");
 assert_eq!(plan["index"], "by_language_priority");
 ```
 
+A join explains itself too (`Join::explain`, or `explain` over the C ABI
+with a join query): its strategy, each table with its access path, and
+where its filter runs:
+
+```rust
+let plan = Query::join("users")
+    .alias("u")
+    .inner_join_as("posts", "p", "u.id", "author_id")
+    .explain(&db)?;
+// {"strategy": "hash_join",
+//  "tables": [{"table": "users", "as": "u", "access": "full_scan"},
+//             {"table": "posts", "as": "p", "access": "full_scan"}],
+//  "filter": "none"}
+```
+
 ### `group`
 
 `by` adds a grouping field, the aggregates (`count`, `count_of`, `sum`, `avg`,
@@ -207,6 +222,13 @@ the whole filter: rows are not re-checked, and a `count` does not read a
 single row. A non-exact plan still returns the right rows — every visited row
 is checked against the full filter — it just reads more of them than
 necessary.
+
+**Joins.** A join reads each of its tables in full; every step builds a
+hash of the joined table by its `on.right` field and probes it with the
+rows combined so far, so it costs one pass over each table and memory for
+the joined ones. Its filter, order and limit run on the combined rows: no
+index narrows a join yet. `explain` of a join says so (`"strategy":
+"hash_join"`, `"access": "full_scan"`, `"filter": "after_join"`).
 
 **Transactions.** LMDB allows one write transaction at a time per
 environment; readers never block writers nor each other. `Db::transaction`

@@ -648,18 +648,29 @@ impl Join {
     pub fn load_in<T: DeserializeOwned>(&self, tx: &mut WriteTx<'_>) -> EngineResult<Vec<T>> {
         decode_rows(&tx.execute(&Statement::from(self.clone()))?)
     }
+
+    /// How the query would run, without running it (see [`Db::explain_join`]).
+    pub fn explain(&self, db: &Db) -> EngineResult<Value> {
+        db.explain_join(&JoinQuery::from(self.clone()))
+    }
 }
 
-impl From<Join> for Statement {
+impl From<Join> for JoinQuery {
     fn from(join: Join) -> Self {
-        Statement::Join(JoinQuery {
+        JoinQuery {
             from: join.from,
             joins: join.joins,
             filter: join.filter,
             order: join.order,
             limit: join.limit,
             offset: join.offset,
-        })
+        }
+    }
+}
+
+impl From<Join> for Statement {
+    fn from(join: Join) -> Self {
+        Statement::Join(JoinQuery::from(join))
     }
 }
 

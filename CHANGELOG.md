@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] - 2026-10-01
+
+### Added
+- `explain` of a join: `Join::explain` / `Db::explain_join`, and the wire
+  `explain` with a join query (it has `from`, a select has `table`). It
+  answers the strategy (`hash_join`), every table with its alias and access
+  path (`full_scan`), and where the filter runs (`after_join` or `none`).
+- Tests against SQLite on the same rows: group by with every aggregate,
+  having, filters, order and limit; inner, left and three-table joins, and
+  a filter on the optional side of a left join.
+- Tests with real processes: a writer killed mid-write (three times) leaves
+  only whole transactions and the next writer resumes; two processes
+  writing at once both commit and see each other's rows; on Unix, a full
+  file system is a Storage error that keeps every commit.
+- Tests of keys with NUL, combining characters and emoji, of an index on
+  text with NUL, and of running out of LMDB databases (`max_dbs`).
+
 ## [0.7.2] - 2026-10-01
 
 ### Fixed

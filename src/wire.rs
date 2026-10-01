@@ -32,7 +32,9 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use crate::engine::session::{self, Mode};
-use crate::engine::{exec, tx, EngineError, EngineResult, Output, Select, Statement, TableDef};
+use crate::engine::{
+    exec, tx, EngineError, EngineResult, JoinQuery, Output, Select, Statement, TableDef,
+};
 use crate::registry::SharedDb;
 
 /// Protocol version spoken by this library.
@@ -97,9 +99,18 @@ fn dispatch(shared: &Arc<SharedDb>, request: &str) -> EngineResult<String> {
             let results: Vec<String> = outputs.iter().map(output_json).collect();
             Ok(format!(r#"{{"results":[{}]}}"#, results.join(",")))
         }
+        // A join query has `from`; a select has `table` instead.
         "explain" => {
-            let query: Select = field(&request, "query")?;
-            let plan = shared.run(|store| exec::explain(store, &query))?;
+            let plan = match request.get("query").and_then(|query| query.get("from")) {
+                Some(_) => {
+                    let query: JoinQuery = field(&request, "query")?;
+                    shared.run(|store| exec::explain_join(store, &query))?
+                }
+                None => {
+                    let query: Select = field(&request, "query")?;
+                    shared.run(|store| exec::explain(store, &query))?
+                }
+            };
             Ok(json!({ "plan": plan }).to_string())
         }
         "begin" => {

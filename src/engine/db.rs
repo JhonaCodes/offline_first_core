@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::error::{EngineError, EngineResult};
 use super::exec;
 use super::schema::TableDef;
-use super::stmt::{Output, Select, Statement};
+use super::stmt::{JoinQuery, Output, Select, Statement};
 use super::store::OpenOptions;
 use super::tx::{self, ReadTx, WriteTx, WriterGuard};
 use crate::registry::{self, SharedDb};
@@ -109,6 +109,12 @@ impl Db {
     /// The plan the planner chooses for `query`, without running it.
     pub fn explain(&self, query: &Select) -> EngineResult<Value> {
         self.shared.run(|store| exec::explain(store, query))
+    }
+
+    /// How `query` would run, without running it: the strategy, every table
+    /// with its access path, and where the filter runs.
+    pub fn explain_join(&self, query: &JoinQuery) -> EngineResult<Value> {
+        self.shared.run(|store| exec::explain_join(store, query))
     }
 
     /// Runs `body` in a write transaction: `Ok` commits, `Err` rolls back.

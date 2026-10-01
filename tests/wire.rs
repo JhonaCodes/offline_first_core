@@ -457,3 +457,45 @@ fn test_update_increment_over_the_wire() {
         "the failed update wrote nothing"
     );
 }
+
+#[test]
+fn explain_of_a_join_names_its_strategy_and_every_table() {
+    let dir = TestDir::new("wire_explain_join");
+    let db = Wire::open(&dir, "db");
+    for table in ["users", "posts"] {
+        db.ok(json!({"v": 1, "op": "define_table", "table": {"name": table, "primary_key": "id"}}));
+    }
+    let join = json!({
+        "from": {"table": "users", "as": "u"},
+        "joins": [{"table": "posts", "as": "p", "kind": "left", "on": {"left": "u.id", "right": "author_id"}}],
+        "filter": {"op": "eq", "field": "u.id", "value": 1}
+    });
+
+    assert_eq!(
+        db.ok(json!({"v": 1, "op": "explain", "query": join})),
+        json!({"plan": {
+            "strategy": "hash_join",
+            "tables": [
+                {"table": "users", "as": "u", "access": "full_scan"},
+                {"table": "posts", "as": "p", "access": "full_scan"}
+            ],
+            "filter": "after_join"
+        }})
+    );
+
+    // Without a filter, and with a missing table.
+    let unfiltered = json!({"from": {"table": "users"}, "joins": [
+        {"table": "posts", "kind": "inner", "on": {"left": "users.id", "right": "author_id"}}
+    ]});
+    assert_eq!(
+        db.ok(json!({"v": 1, "op": "explain", "query": unfiltered}))["plan"]["filter"],
+        "none"
+    );
+    let missing = json!({"from": {"table": "users"}, "joins": [
+        {"table": "nope", "kind": "inner", "on": {"left": "users.id", "right": "x"}}
+    ]});
+    assert_eq!(
+        db.error_code(json!({"v": 1, "op": "explain", "query": missing})),
+        "TableNotFound"
+    );
+}

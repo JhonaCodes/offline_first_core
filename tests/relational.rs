@@ -760,3 +760,41 @@ fn test_statements_new_ops_round_trip_as_json() {
     let back: Statement = serde_json::from_str(&text).expect("deserialize");
     assert_eq!(back, join);
 }
+
+#[test]
+fn a_join_explains_its_strategy_without_running() {
+    let dir = TestDir::new("join_explain");
+    let db = open(&dir, "db");
+    db.define_table(TableDef::new("users", "id"))
+        .expect("users");
+    db.define_table(TableDef::new("posts", "id"))
+        .expect("posts");
+
+    let plan = Query::join("users")
+        .alias("u")
+        .inner_join_as("posts", "p", "u.id", "author_id")
+        .explain(&db)
+        .expect("explain");
+
+    assert_eq!(
+        plan,
+        json!({
+            "strategy": "hash_join",
+            "tables": [
+                {"table": "users", "as": "u", "access": "full_scan"},
+                {"table": "posts", "as": "p", "access": "full_scan"}
+            ],
+            "filter": "none"
+        })
+    );
+
+    // A repeated alias is refused here too, as when the join runs.
+    let repeated = Query::join("users")
+        .alias("u")
+        .inner_join_as("posts", "u", "u.id", "author_id")
+        .explain(&db);
+    assert!(
+        matches!(repeated, Err(EngineError::InvalidRequest(_))),
+        "{repeated:?}"
+    );
+}

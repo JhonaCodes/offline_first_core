@@ -6,10 +6,11 @@
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::iter;
 
 use natdb::{Cursor, RwTransaction, Transaction, WriteFlags};
 use natdb_sys::{MDB_FIRST, MDB_LAST, MDB_NEXT, MDB_PREV, MDB_SET_RANGE};
-use serde_json::{Map, Number, Value};
+use serde_json::{json, Map, Number, Value};
 
 use super::error::{EngineError, EngineResult};
 use super::keys::{encode_key, encode_values, prefix_successor};
@@ -354,6 +355,34 @@ fn distinct_key(row: &Value, fields: &[String]) -> Vec<u8> {
 pub fn explain(store: &Store, query: &Select) -> EngineResult<Value> {
     let table = store.table(&query.table)?;
     Ok(plan::choose(&table, query.filter.as_ref(), &query.order).explain(&table))
+}
+
+/// The plan of a join (`explain`), as [`join`] runs it: every table is read
+/// in full, each step builds a hash of the joined table by `on.right` and
+/// probes it with the combined rows, and the filter, if any, runs on the
+/// combined rows.
+pub fn explain_join(store: &Store, query: &JoinQuery) -> EngineResult<Value> {
+    let from_alias = join_alias(&query.from.alias, &query.from.table);
+    let sources = iter::once((query.from.table.as_str(), from_alias)).chain(
+        query
+            .joins
+            .iter()
+            .map(|step| (step.table.as_str(), join_alias(&step.alias, &step.table))),
+    );
+    let mut aliases = Vec::new();
+    let mut tables = Vec::new();
+    for (table, alias) in sources {
+        store.table(table)?;
+        aliases.push(alias);
+        tables.push(json!({"table": table, "as": alias, "access": "full_scan"}));
+    }
+    validate_join_aliases(&aliases)?;
+
+    Ok(json!({
+        "strategy": "hash_join",
+        "tables": tables,
+        "filter": if query.filter.is_some() { "after_join" } else { "none" },
+    }))
 }
 
 fn count<T: Transaction>(
