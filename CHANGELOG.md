@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.6] - 2026-10-01
+
+### Fixed
+- Sync: claiming changes, releasing a lease and listing pending changes
+  read only what they answer, instead of every open change of the remote.
+  Claiming and acknowledging 100 changes took 780 ms with 100 000 pending
+  and takes 24 ms at any backlog (an index of the changes of each lease,
+  and the open changes read a step at a time; RFC §13.17). Leases taken
+  before 0.7.6 are released when they expire.
+- The memory map grows ahead: before an operation begins, it doubles when
+  the pages in use passed half of it. Before, it grew only after a write hit
+  its end, so every growth failed the transaction in flight with `MapFull`
+  (a transaction cannot be replayed); one after another, transactions now
+  never meet a full map. The README said a failed write was always retried:
+  that holds for statements and batches, not for transactions, which
+  answer `MapFull` for the caller to run again.
+
+### Added
+- The C ABI v2 (`include/localdb.h`): `ldb_open`, `ldb_execute`,
+  `ldb_buffer_view`, `ldb_buffer_release`, `ldb_close` and
+  `ldb_abi_version`, with `u64` handles validated against a registry
+  (never reused, the kind is part of the id) and response buffers of a
+  pointer and a length. A second close or release, a use after close, a
+  foreign or made-up handle answer `LDB_INVALID_HANDLE` instead of
+  undefined behaviour; panics are contained (`LDB_PANIC`); requests over
+  256 MiB answer `LDB_REQUEST_TOO_LARGE`. The v1 symbols are unchanged and
+  share the databases of a path with v2 handles.
+- Tests: malformed wire requests (truncated JSON, removed fields, extreme
+  numbers, unknown operations, nesting past the parser's limit) answer an
+  error, never a crash or a panic (`tests/fuzz_wire.rs`); the map grows
+  under concurrent writers to a synchronized table and readers without
+  losing a row or a pending change (`tests/stress.rs`); wire responses
+  freed with `ofc_free_string` keep the heap stable (`tests/memory.rs`).
+- `tool/bench.sh` runs the benchmarks at 10 000, 100 000 and 1 000 000 rows
+  into `BENCHMARKS.md`, with the hardware and versions: composite ranges,
+  top-k, joins, `eq_any`, durable batches with and without the sync outbox,
+  sync claim and acknowledgement, and the cost of the JSON wire next to the
+  Rust API.
+
 ## [0.7.5] - 2026-10-01
 
 ### Added

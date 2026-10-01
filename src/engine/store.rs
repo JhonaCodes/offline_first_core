@@ -508,9 +508,19 @@ impl Store {
         self.needs_growth.store(true, Ordering::SeqCst);
     }
 
-    /// Whether a growth was requested.
+    /// Whether a growth was requested, or the pages in use passed half of
+    /// the map: growing then, before a transaction begins, leaves the next
+    /// ones room, so only a transaction that alone writes more than half of
+    /// the map can meet a full one.
     pub(crate) fn growth_requested(&self) -> bool {
-        self.needs_growth.load(Ordering::SeqCst)
+        self.needs_growth.load(Ordering::SeqCst) || self.half_full().unwrap_or(false)
+    }
+
+    fn half_full(&self) -> EngineResult<bool> {
+        let info = self.env.info()?;
+        let page_size = usize::try_from(self.env.stat()?.page_size()).unwrap_or(usize::MAX);
+        let used = info.last_pgno().saturating_add(1).saturating_mul(page_size);
+        Ok(info.map_size() < self.max_map_size && used.saturating_mul(2) > info.map_size())
     }
 
     /// Doubles the memory map, up to the configured maximum. Returns whether

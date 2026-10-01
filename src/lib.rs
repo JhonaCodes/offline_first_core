@@ -92,6 +92,7 @@
 //!   acquisition of that lock panic while it is held, to test that a poisoned
 //!   lock is recovered. It must never be enabled in a shipped build.
 
+pub mod abi_v2;
 mod app_response;
 mod boundary;
 pub mod engine;

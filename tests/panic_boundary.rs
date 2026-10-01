@@ -10,8 +10,12 @@
 mod common;
 
 use std::ffi::c_char;
+use std::ptr;
 
 use common::{c_string, FfiDb, FfiResponse, TestDir};
+use offline_first_core::abi_v2::{
+    ldb_buffer_release, ldb_close, ldb_execute, ldb_open, LDB_OK, LDB_PANIC,
+};
 use offline_first_core::{
     clear_all_records, close_database, create_db, delete_by_id, get_all, get_by_id,
     ofc_fault_injection_arm, ofc_fault_injection_arm_in_database_lock,
@@ -171,4 +175,41 @@ fn test_a_poisoned_database_lock_is_recovered() {
     assert_eq!(db.ids(), ["after", "before"]);
     let second = FfiDb::open(&dir, "second");
     assert_eq!(second.push("record").variant, "Ok");
+}
+
+/// The entry points of the ABI v2 contain a panic too: `LDB_PANIC`, nothing
+/// answered, and the handle keeps working.
+#[test]
+fn test_abi_v2_contains_a_panic() {
+    let dir = TestDir::new("abi_v2_panic");
+    let path = dir.db_name("db");
+    let mut handle = 0;
+    let mut response = 0;
+    // SAFETY: `path` is live; the outs are writable.
+    let opened = unsafe {
+        ldb_open(
+            path.as_ptr(),
+            path.len(),
+            ptr::null(),
+            0,
+            &mut handle,
+            &mut response,
+        )
+    };
+    assert_eq!(opened, LDB_OK);
+    assert_eq!(ldb_buffer_release(response), LDB_OK);
+    let request = br#"{"v":1,"op":"tables"}"#;
+
+    ofc_fault_injection_arm();
+    let mut answer = 0;
+    // SAFETY: `request` is live; `answer` is writable.
+    let status = unsafe { ldb_execute(handle, request.as_ptr(), request.len(), &mut answer) };
+    assert_eq!(status, LDB_PANIC);
+    assert_eq!(answer, 0, "nothing answered");
+
+    // SAFETY: as above.
+    let again = unsafe { ldb_execute(handle, request.as_ptr(), request.len(), &mut answer) };
+    assert_eq!(again, LDB_OK, "the handle keeps working");
+    assert_eq!(ldb_buffer_release(answer), LDB_OK);
+    assert_eq!(ldb_close(handle), LDB_OK);
 }

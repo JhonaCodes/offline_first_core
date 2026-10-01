@@ -11,6 +11,7 @@ use std::fs;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,7 +19,8 @@ use offline_first_core::local_db_model::LocalDbModel;
 use offline_first_core::local_db_state::AppDbState;
 use offline_first_core::DbHandle;
 use offline_first_core::{
-    close_database, create_db, get_all, get_by_id, ofc_free_string, push_data, reset_database,
+    close_database, create_db, get_all, get_by_id, ofc_execute, ofc_free_string, ofc_open,
+    push_data, reset_database,
 };
 use serde_json::{json, Map, Value};
 
@@ -268,4 +270,61 @@ fn path_to_string(path: &Path) -> String {
     path.to_str()
         .expect("test paths must be valid UTF-8")
         .to_owned()
+}
+
+/// A handle opened with `ofc_open`, closed on drop.
+pub struct Wire(pub *mut DbHandle);
+
+impl Wire {
+    pub fn open(dir: &TestDir, name: &str) -> Self {
+        let path = CString::new(dir.db_name(name)).expect("path");
+        let mut handle = ptr::null_mut();
+        // SAFETY: `path` is a live CString and `handle` is writable.
+        let response = take_wire(unsafe { ofc_open(path.as_ptr(), ptr::null(), &mut handle) });
+        assert!(response.get("ok").is_some(), "{response}");
+        Self(handle)
+    }
+
+    pub fn call(&self, request: Value) -> Value {
+        let text = CString::new(request.to_string()).expect("request");
+        // SAFETY: `self.0` is a live handle and `text` a live CString.
+        take_wire(unsafe { ofc_execute(self.0, text.as_ptr()) })
+    }
+
+    pub fn ok(&self, request: Value) -> Value {
+        let response = self.call(request.clone());
+        assert_eq!(response["v"], 1, "{response}");
+        response
+            .get("ok")
+            .cloned()
+            .unwrap_or_else(|| panic!("{request} failed: {response}"))
+    }
+
+    pub fn error_code(&self, request: Value) -> String {
+        let response = self.call(request);
+        response["error"]["code"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected an error: {response}"))
+            .to_string()
+    }
+}
+
+impl Drop for Wire {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` came from `ofc_open` and is closed exactly once.
+        take_wire(unsafe { close_database(self.0) });
+    }
+}
+
+/// Reads and releases a response string.
+pub fn take_wire(response: *const c_char) -> Value {
+    assert!(!response.is_null());
+    // SAFETY: `response` is a NUL-terminated string returned by the library.
+    let text = unsafe { CStr::from_ptr(response) }
+        .to_str()
+        .expect("UTF-8")
+        .to_owned();
+    // SAFETY: released exactly once.
+    unsafe { ofc_free_string(response.cast_mut()) };
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"))
 }

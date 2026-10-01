@@ -2,71 +2,14 @@
 
 mod common;
 
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::ptr;
 use std::thread;
 use std::time::Duration;
 
-use common::TestDir;
-use offline_first_core::{close_database, ofc_execute, ofc_free_string, ofc_open, DbHandle};
+use common::{take_wire as take, TestDir, Wire};
+use offline_first_core::ofc_execute;
 use serde_json::{json, Value};
-
-/// A handle opened with `ofc_open`, closed on drop.
-struct Wire(*mut DbHandle);
-
-impl Wire {
-    fn open(dir: &TestDir, name: &str) -> Self {
-        let path = CString::new(dir.db_name(name)).expect("path");
-        let mut handle = ptr::null_mut();
-        // SAFETY: `path` is a live CString and `handle` is writable.
-        let response = take(unsafe { ofc_open(path.as_ptr(), ptr::null(), &mut handle) });
-        assert!(response.get("ok").is_some(), "{response}");
-        Self(handle)
-    }
-
-    fn call(&self, request: Value) -> Value {
-        let text = CString::new(request.to_string()).expect("request");
-        // SAFETY: `self.0` is a live handle and `text` a live CString.
-        take(unsafe { ofc_execute(self.0, text.as_ptr()) })
-    }
-
-    fn ok(&self, request: Value) -> Value {
-        let response = self.call(request.clone());
-        assert_eq!(response["v"], 1, "{response}");
-        response
-            .get("ok")
-            .cloned()
-            .unwrap_or_else(|| panic!("{request} failed: {response}"))
-    }
-
-    fn error_code(&self, request: Value) -> String {
-        let response = self.call(request);
-        response["error"]["code"]
-            .as_str()
-            .unwrap_or_else(|| panic!("expected an error: {response}"))
-            .to_string()
-    }
-}
-
-impl Drop for Wire {
-    fn drop(&mut self) {
-        // SAFETY: `self.0` came from `ofc_open` and is closed exactly once.
-        take(unsafe { close_database(self.0) });
-    }
-}
-
-/// Reads and releases a response string.
-fn take(response: *const std::ffi::c_char) -> Value {
-    assert!(!response.is_null());
-    // SAFETY: `response` is a NUL-terminated string returned by the library.
-    let text = unsafe { CStr::from_ptr(response) }
-        .to_str()
-        .expect("UTF-8")
-        .to_owned();
-    // SAFETY: released exactly once.
-    unsafe { ofc_free_string(response.cast_mut()) };
-    serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"))
-}
 
 fn define(db: &Wire) {
     db.ok(json!({"v": 1, "op": "define_table", "table": {

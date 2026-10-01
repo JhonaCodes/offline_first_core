@@ -16,8 +16,9 @@ use std::ffi::{c_char, CString};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use common::{c_string, FfiDb, FfiResponse, TestDir};
-use offline_first_core::{get_by_id, ofc_free_string, push_data};
+use common::{c_string, FfiDb, FfiResponse, TestDir, Wire};
+use offline_first_core::{get_by_id, ofc_execute, ofc_free_string, push_data};
+use serde_json::json;
 
 /// `System` wrapped with a counter of live (allocated and not yet freed) bytes.
 struct CountingAllocator;
@@ -175,5 +176,54 @@ fn test_counter_detects_unfreed_responses() {
     assert!(
         growth >= minimum,
         "expected at least {minimum} leaked bytes without freeing, measured {growth}"
+    );
+}
+
+/// Requests of the wire protocol, freed with `ofc_free_string`, keep the heap
+/// stable too: rows, a sync state, and an error answer.
+#[test]
+fn test_wire_requests_and_free_keep_heap_stable() {
+    const WIRE_CYCLES: usize = 20_000;
+    let _serial = lock_measurement();
+    let dir = TestDir::new("memory_wire");
+    let db = Wire::open(&dir, "wire");
+    db.ok(json!({"v": 1, "op": "define_table", "table": {
+        "name": "notes", "primary_key": "id", "sync": "primary"
+    }}));
+    db.ok(json!({"v": 1, "op": "execute", "statement": {
+        "op": "insert", "table": "notes", "rows": [{"id": "a", "title": "t"}]
+    }}));
+    let requests: Vec<CString> = [
+        json!({"v": 1, "op": "execute", "statement": {"op": "find", "table": "notes", "key": "a"}}),
+        json!({"v": 1, "op": "execute", "statement": {"op": "select", "table": "notes"}}),
+        json!({"v": 1, "op": "sync_state", "table": "notes", "key": "a"}),
+        json!({"v": 1, "op": "sync_status", "remote": "primary"}),
+        json!({"v": 1, "op": "no_such_operation"}),
+    ]
+    .iter()
+    .map(|request| c_string(&request.to_string()))
+    .collect();
+    let cycles = |count: usize| {
+        for _ in 0..count {
+            for request in &requests {
+                // SAFETY: `db.0` is a live handle and `request` a live CString.
+                let response = unsafe { ofc_execute(db.0, request.as_ptr()) };
+                assert!(!response.is_null(), "ofc_execute returned a null response");
+                // SAFETY: `response` was just returned and is freed exactly once.
+                unsafe { ofc_free_string(response.cast_mut()) };
+            }
+        }
+    };
+
+    cycles(WARM_UP_CYCLES);
+    let baseline = live_bytes();
+    cycles(WIRE_CYCLES);
+    let drift = live_bytes() - baseline;
+    println!("live heap drift after {WIRE_CYCLES} wire cycles: {drift} bytes");
+
+    assert!(
+        drift.abs() <= TOLERANCE_BYTES,
+        "live heap drifted by {drift} bytes after {WIRE_CYCLES} cycles of {} requests",
+        requests.len()
     );
 }

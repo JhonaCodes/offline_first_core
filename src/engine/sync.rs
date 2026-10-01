@@ -64,6 +64,11 @@ const MUTATION: u8 = b'x';
 const REMOTE: u8 = b'r';
 const CONFLICT: u8 = b'k';
 const COUNTER: u8 = b'n';
+const LEASE: u8 = b'l';
+
+/// Open changes read per step of a scan, so a claim or a listing never
+/// reads more of the outbox than it answers (RFC §13.17).
+const SCAN_STEP: usize = 256;
 
 /// What a change does to its row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -764,18 +769,87 @@ fn keys_with_prefix<Tx: Transaction>(
     Ok(keys)
 }
 
-/// Sequences of the open changes of `remote`, in commit order.
-fn open_sequences<Tx: Transaction>(txn: &Tx, db: Database, remote: &str) -> EngineResult<Vec<u64>> {
+/// The sequence at the end of `key`, after `prefix`.
+fn sequence_after(prefix: &[u8], key: &[u8]) -> EngineResult<u64> {
+    key.get(prefix.len()..)
+        .and_then(|tail| <[u8; 8]>::try_from(tail).ok())
+        .map(u64::from_be_bytes)
+        .ok_or_else(|| corrupt("sequence key"))
+}
+
+/// Up to `limit` sequences of open changes of `remote` after `after`, in
+/// commit order.
+fn open_sequences_after<Tx: Transaction>(
+    txn: &Tx,
+    db: Database,
+    remote: &str,
+    after: Option<u64>,
+    limit: usize,
+) -> EngineResult<Vec<u64>> {
     let prefix = with_name(OPEN, remote);
-    keys_with_prefix(txn, db, &prefix)?
-        .into_iter()
-        .map(|key| {
-            key.get(prefix.len()..)
-                .and_then(|tail| <[u8; 8]>::try_from(tail).ok())
-                .map(u64::from_be_bytes)
-                .ok_or_else(|| corrupt("open change key"))
-        })
-        .collect()
+    let start = match after {
+        Some(sequence) => open_key(remote, sequence.saturating_add(1)),
+        None => prefix.clone(),
+    };
+    let mut cursor = txn.open_ro_cursor(db)?;
+    let mut sequences = Vec::new();
+    for entry in cursor.iter_from(&start) {
+        let (key, _) = entry?;
+        if !key.starts_with(&prefix) || sequences.len() >= limit {
+            break;
+        }
+        sequences.push(sequence_after(&prefix, key)?);
+    }
+    Ok(sequences)
+}
+
+/// Visits the open changes of `remote` in commit order, a step at a time,
+/// until `visit` answers `false`.
+fn scan_open(
+    txn: &mut RwTransaction<'_>,
+    db: Database,
+    remote: &str,
+    mut visit: impl FnMut(&mut RwTransaction<'_>, u64) -> EngineResult<bool>,
+) -> EngineResult<()> {
+    let mut after = None;
+    loop {
+        let step = open_sequences_after(txn, db, remote, after, SCAN_STEP)?;
+        if step.is_empty() {
+            return Ok(());
+        }
+        for sequence in step {
+            after = Some(sequence);
+            if !visit(txn, sequence)? {
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn lease_key(lease: u64, sequence: u64) -> Vec<u8> {
+    let mut key = vec![LEASE];
+    key.extend_from_slice(&lease.to_be_bytes());
+    key.extend_from_slice(&sequence.to_be_bytes());
+    key
+}
+
+/// Moves the change `sequence` to `lease` (or out of any), keeping the
+/// index of each lease's changes in step.
+fn set_lease(
+    txn: &mut RwTransaction<'_>,
+    db: Database,
+    change: &mut Change,
+    sequence: u64,
+    lease: Option<u64>,
+) -> EngineResult<()> {
+    if let Some(old) = change.lease_id {
+        remove(txn, db, &lease_key(old, sequence))?;
+    }
+    if let Some(new) = lease {
+        txn.put(db, &lease_key(new, sequence), b"", WriteFlags::empty())?;
+    }
+    change.lease_id = lease;
+    Ok(())
 }
 
 fn change<Tx: Transaction>(txn: &Tx, db: Database, sequence: u64) -> EngineResult<Change> {
@@ -995,9 +1069,10 @@ fn settle(
     settlement: Settlement,
     now: u64,
 ) -> EngineResult<()> {
-    let change = change(txn, db, sequence)?;
+    let mut change = change(txn, db, sequence)?;
     remove(txn, db, &change_key(sequence))?;
     remove(txn, db, &open_key(&change.remote, sequence))?;
+    set_lease(txn, db, &mut change, sequence, None)?;
     let pk = encode_key(&change.key);
     let meta_key = meta_key(&change.table, &pk);
     let mut meta: Meta =
@@ -1080,9 +1155,10 @@ pub(crate) fn purge_table(
             continue;
         };
         for sequence in &meta.open {
-            let change = change(txn, db, *sequence)?;
+            let mut change = change(txn, db, *sequence)?;
             remove(txn, db, &change_key(*sequence))?;
             remove(txn, db, &open_key(&change.remote, *sequence))?;
+            set_lease(txn, db, &mut change, *sequence, None)?;
             remove(txn, db, &tagged(MUTATION, &change.mutation_id))?;
             update_remote(txn, db, &change.remote, |record| {
                 record.pending = record.pending.saturating_sub(1);
@@ -1121,14 +1197,14 @@ pub(crate) fn claim(
         let mut envelopes = Vec::new();
         let mut bytes = 0u64;
         let mut lease_id = None;
-        for sequence in open_sequences(txn, db, remote)? {
+        scan_open(txn, db, remote, |txn, sequence| {
             if envelopes.len() as u64 >= limits.max_changes {
-                break;
+                return Ok(false);
             }
             let mut change = change(txn, db, sequence)?;
             let meta_key = meta_key(&change.table, &encode_key(&change.key));
             if !seen.insert(meta_key.clone()) {
-                continue;
+                return Ok(true);
             }
             let meta: Meta =
                 read(txn, db, &meta_key)?.ok_or_else(|| corrupt("an open change has no entity"))?;
@@ -1136,7 +1212,7 @@ pub(crate) fn claim(
                 && meta.conflict.is_none()
                 && change.delivery(now) == DeliveryKind::Pending;
             if !eligible {
-                continue;
+                return Ok(true);
             }
             if !change.prepared {
                 change.prepared = true;
@@ -1147,7 +1223,7 @@ pub(crate) fn claim(
             let size = serde_json::to_vec(&envelope).map_or(0, |json| json.len() as u64);
             if let Some(max) = limits.max_bytes {
                 if !envelopes.is_empty() && bytes + size > max {
-                    break;
+                    return Ok(false);
                 }
             }
             let lease = match lease_id {
@@ -1159,12 +1235,13 @@ pub(crate) fn claim(
                 }
             };
             change.state = DeliveryKind::Leased;
-            change.lease_id = Some(lease);
+            set_lease(txn, db, &mut change, sequence, Some(lease))?;
             change.lease_expires_at = Some(now.saturating_add(limits.lease_ms));
             write(txn, db, &change_key(sequence), &change)?;
             envelopes.push(envelope);
             bytes += size;
-        }
+            Ok(true)
+        })?;
         Ok(ClaimedBatch {
             lease_id,
             envelopes,
@@ -1246,11 +1323,23 @@ fn release_lease(
     reason: Option<&str>,
 ) -> EngineResult<u64> {
     let mut released = 0;
-    for sequence in open_sequences(txn, db, remote)? {
+    let prefix = {
+        let mut prefix = vec![LEASE];
+        prefix.extend_from_slice(&lease_id.to_be_bytes());
+        prefix
+    };
+    let sequences = keys_with_prefix(txn, db, &prefix)?
+        .iter()
+        .map(|key| sequence_after(&prefix, key))
+        .collect::<EngineResult<Vec<_>>>()?;
+    for sequence in sequences {
         let mut change = change(txn, db, sequence)?;
-        if change.state == DeliveryKind::Leased && change.lease_id == Some(lease_id) {
+        if change.remote == remote
+            && change.state == DeliveryKind::Leased
+            && change.lease_id == Some(lease_id)
+        {
             change.state = DeliveryKind::Pending;
-            change.lease_id = None;
+            set_lease(txn, db, &mut change, sequence, None)?;
             change.lease_expires_at = None;
             if let Some(reason) = reason {
                 change.last_error = Some(reason.to_string());
@@ -1305,7 +1394,7 @@ pub(crate) fn apply_push_result(
             } else {
                 DeliveryKind::Blocked
             };
-            change.lease_id = None;
+            set_lease(txn, db, &mut change, sequence, None)?;
             change.lease_expires_at = None;
             change.last_error = Some(rejection.reason.clone());
             write(txn, db, &change_key(sequence), &change)?;
@@ -1668,13 +1757,21 @@ pub(crate) fn pending(
             .and_then(|n| usize::try_from(n).ok())
             .unwrap_or(usize::MAX);
         let mut changes = Vec::new();
-        for sequence in open_sequences(txn, db, remote)? {
-            if changes.len() >= limit {
+        let mut after = None;
+        'scan: loop {
+            let step = open_sequences_after(txn, db, remote, after, SCAN_STEP)?;
+            if step.is_empty() {
                 break;
             }
-            let change = change(txn, db, sequence)?;
-            if table.is_none_or(|name| name == change.table) {
-                changes.push(change.summary(now));
+            for sequence in step {
+                if changes.len() >= limit {
+                    break 'scan;
+                }
+                after = Some(sequence);
+                let change = change(txn, db, sequence)?;
+                if table.is_none_or(|name| name == change.table) {
+                    changes.push(change.summary(now));
+                }
             }
         }
         Ok(PendingChanges { count, changes })

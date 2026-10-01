@@ -343,10 +343,16 @@ results, `apply_remote` and `resolve_conflict` are write transactions of
 their own, short, and never span the network.
 
 **Growth.** The memory map starts at `initial_map_size` (64 MiB by default)
-and is reserved address space, not disk space. When a write hits the current
-map size, the transaction fails, the map doubles (up to `max_map_size`) under
-an exclusive lock that waits for every other transaction of the process to
-finish, and the write is retried.
+and is reserved address space, not disk space. Before an operation begins,
+the map doubles (up to `max_map_size`) when the pages in use passed half of
+it, under an exclusive lock that waits for every other transaction of the
+process to finish; so the next transactions find room. A write that still
+hits the end of the map fails with `MapFull` and the map doubles before the
+next operation: a single statement or a batch is then run again on its own,
+while a transaction (whose closure cannot be replayed) answers `MapFull`
+for the caller to run again. That only happens when one transaction alone
+writes more than half of the map, or several large ones race on a small
+map.
 
 **Panics.** Every C ABI entry point runs its body through
 `std::panic::catch_unwind`: an internal panic is logged and turned into an
@@ -400,6 +406,31 @@ The wire protocol spoken by `ofc_execute` is specified in db_dsl's
 [PROTOCOL.md](https://github.com/JhonaCodes/db_dsl/blob/main/PROTOCOL.md);
 `src/wire.rs` is this crate's implementation of it.
 
+### ABI v2 (`include/localdb.h`)
+
+Since 0.7.6 the same protocol is also served through handles that cannot
+dangle (RFC-001 §12.2). The Dart SDKs still use the v1 symbols above; both
+ABIs work side by side and share the databases of a path.
+
+| Symbol | Purpose |
+|---|---|
+| `ldb_abi_version()` | `2` |
+| `ldb_open(path, len, options, len, *out, *response)` | Opens `<path>.lmdb`; writes a `u64` handle and a response buffer |
+| `ldb_execute(db, request, len, *response)` | Runs one request (bytes with a length, so any byte may appear in it) |
+| `ldb_buffer_view(buffer, *data, *len)` | Where a response is, until released |
+| `ldb_buffer_release(buffer)` | Releases a response |
+| `ldb_close(db)` | Releases a handle; the database closes with its last handle |
+
+Each call answers a status code: `LDB_OK`, or `LDB_INVALID_HANDLE` for a
+handle that is closed, released, of the other kind (database or buffer) or
+never issued (so a second close or release is harmless),
+`LDB_NULL_POINTER`, `LDB_INVALID_UTF8`, `LDB_PANIC` (contained) or
+`LDB_REQUEST_TOO_LARGE` (over 256 MiB). Handles are ids validated against a
+registry and never reused; the details of a failed operation travel in its
+response, as wire JSON. `tests/abi_v2.rs` covers double close and release,
+use after close, foreign and made-up handles, hot restart and concurrent
+requests.
+
 ## How it should be used
 
 - **Group writes.** A durable commit flushes (`F_FULLFSYNC` on Apple
@@ -423,6 +454,9 @@ The wire protocol spoken by `ofc_execute` is specified in db_dsl's
   owner thread and, for writes, the single writer slot, until committed,
   rolled back, or idle past their timeout; a long-lived interactive
   transaction blocks every other write meanwhile.
+- **Treat `MapFull` from a transaction as retryable.** Run the unit of work
+  again (the map grew meanwhile); size `initial_map_size` above what one
+  transaction writes to make it rare.
 - **Choose durability deliberately.** `full` (the default) survives a power
   loss; `no_meta_sync`/`no_sync` trade that guarantee for throughput and
   should be a conscious choice, not an accident.
@@ -468,23 +502,26 @@ misplaced absolute paths on Linux and Windows).
 
 ## Benchmarks
 
-`cargo run --release --example bench -- 10000` — median of 5 runs, durable
-commits, Apple M1 Max, macOS 26.7, 10 000 rows with two indexes (0.6.2):
+[BENCHMARKS.md](BENCHMARKS.md) has the whole matrix at 10 000, 100 000 and
+1 000 000 rows, reproduced with one command, `tool/bench.sh` (it records
+the hardware and the versions). Every write is durable. On an Apple M1 Max
+(0.7.6), at 1 000 000 rows:
 
 | Operation | Per op |
 |---|---|
-| Insert, batch of 10 000 in one transaction | 6.5 µs |
-| Insert, one transaction per row | 9.1–10.2 ms (one `F_FULLFSYNC` per commit) |
-| Find by primary key | 1.5 µs |
-| Indexed query (`city = x AND age > y`, limit 50) | 38 µs |
-| Top 20 through an index (`order(age.desc())`) | 15 µs |
-| Indexed count (`city = x`, 2 500 matches) | 31 µs |
-| Full scan with an unindexed filter (10 000 rows) | 5.4 ms |
-| Update one row by key (own transaction) | 9.9–10.4 ms |
+| Insert, batch in one transaction | 6.0 µs per row (9.4 µs with the sync outbox) |
+| Insert or update, one transaction per row | 9.6–9.9 ms (one `F_FULLFSYNC` per commit) |
+| Find by primary key | 2.2 µs (3.1 µs as JSON through `ofc_execute`) |
+| Composite range (`city = x AND age > y`, limit 50) | 46 µs |
+| Top 20 through an index | 18 µs |
+| Posts of 50 users (`eq_any` on an index) | 68 µs |
+| Sync: claim and acknowledge 100 changes | 24 ms (two durable commits) |
+| Hash join over two full tables (1 000 000 ⋈ 250 000) | 1.45 s |
 
-Durable single-row commits cost one full flush on Apple hardware; group writes
-in a transaction or a batch to amortize it, or open with a relaxed
-`Durability`.
+Durable single-row commits cost one full flush on Apple hardware; group
+writes in a transaction or a batch to amortize it, or open with a relaxed
+`Durability`. A join reads both tables in full until the join planner uses
+indexes (on the roadmap).
 
 ## Building the native libraries
 
