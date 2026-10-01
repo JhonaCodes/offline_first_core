@@ -15,7 +15,7 @@ use std::io;
 use std::path::Path;
 use std::str::{self, Utf8Error};
 
-use log::{info, warn};
+use log::info;
 use natdb::{Cursor, Transaction, WriteFlags};
 use thiserror::Error;
 
@@ -158,8 +158,13 @@ impl AppDbState {
         }
     }
 
-    /// All records, in id order. Records that cannot be decoded are skipped
-    /// with a warning, as in 0.5.0.
+    /// All records, in id order.
+    ///
+    /// A record that cannot be decoded fails the whole listing with
+    /// [`DbError::Utf8`] or [`DbError::Deserialization`], naming its id:
+    /// a listing that left it out would look complete while it is not. The
+    /// caller recovers with [`AppDbState::delete_by_id`] (or a rewrite) of
+    /// that id.
     pub fn get(&self) -> Result<Vec<LocalDbModel>, DbError> {
         let store = self.legacy_store()?;
         let txn = store.env().begin_ro_txn()?;
@@ -167,10 +172,7 @@ impl AppDbState {
         let mut models = Vec::new();
         for entry in cursor.iter_start() {
             let (key, value) = entry?;
-            match decode_record(&String::from_utf8_lossy(key), value) {
-                Ok(model) => models.push(model),
-                Err(error) => warn!("Skipping undecodable record: {error}"),
-            }
+            models.push(decode_record(&String::from_utf8_lossy(key), value)?);
         }
         Ok(models)
     }

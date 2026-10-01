@@ -86,8 +86,11 @@
 //!
 //! - `fault-injection` (off by default, **tests only**): exports
 //!   `ofc_fault_injection_arm`, which makes the next entry point called on the
-//!   same thread panic inside its guard, to test the panic containment. It
-//!   must never be enabled in a shipped build.
+//!   same thread panic inside its guard, to test the panic containment, and
+//!   `ofc_fault_injection_arm_in_registry_lock` /
+//!   `ofc_fault_injection_arm_in_database_lock`, which make the next
+//!   acquisition of that lock panic while it is held, to test that a poisoned
+//!   lock is recovered. It must never be enabled in a shipped build.
 
 mod app_response;
 mod boundary;
@@ -113,7 +116,10 @@ use crate::local_db_model::LocalDbModel;
 use crate::local_db_state::AppDbState;
 
 #[cfg(feature = "fault-injection")]
-pub use crate::fault_injection::ofc_fault_injection_arm;
+pub use crate::fault_injection::{
+    ofc_fault_injection_arm, ofc_fault_injection_arm_in_database_lock,
+    ofc_fault_injection_arm_in_registry_lock,
+};
 pub use crate::handle::DbHandle;
 
 /// Opens the database stored at `<name>.lmdb`, creating it if needed, and

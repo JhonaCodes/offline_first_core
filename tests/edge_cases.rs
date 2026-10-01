@@ -176,32 +176,34 @@ fn test_json_edge_cases() {
     let dir = TestDir::new("json_edge_cases");
     let state = dir.open("db");
 
-    // Deep nesting: must be stored or rejected gracefully
-    let deep_json = (0..100).fold("\"value\"".to_string(), |acc, i| {
-        format!(r#"{{"level{i}": {acc}}}"#)
-    });
-    let deep_model = LocalDbModel {
-        id: "deep_test".to_string(),
-        hash: "deep_hash".to_string(),
-        data: serde_json::from_str(&deep_json).unwrap_or_else(|_| json!({})),
-    };
-    let _result = state.push(deep_model);
+    // 100 levels of nesting (below serde_json's recursion limit), a large
+    // array and a null payload: each is stored and read back unchanged.
+    let deep = (0..100).fold(
+        json!("value"),
+        |inner, i| json!({ format!("level{i}"): inner }),
+    );
+    let cases = [
+        ("deep_test", deep),
+        ("large_array", json!((0..1000).collect::<Vec<i32>>())),
+        ("empty_test", json!(null)),
+    ];
 
-    // Large array
-    let large_model = LocalDbModel {
-        id: "large_array".to_string(),
-        hash: "large_hash".to_string(),
-        data: json!((0..1000).collect::<Vec<i32>>()),
-    };
-    let _result = state.push(large_model);
+    for (id, data) in cases {
+        let model = LocalDbModel {
+            id: id.to_string(),
+            hash: format!("hash_{id}"),
+            data: data.clone(),
+        };
+        state
+            .push(model)
+            .unwrap_or_else(|e| panic!("{id}: push failed: {e:?}"));
 
-    // Empty values
-    let empty_model = LocalDbModel {
-        id: "empty_test".to_string(),
-        hash: String::new(),
-        data: json!(null),
-    };
-    let _result = state.push(empty_model);
+        let stored = state
+            .get_by_id(id)
+            .unwrap_or_else(|e| panic!("{id}: lookup failed: {e:?}"))
+            .unwrap_or_else(|| panic!("{id}: the record must exist"));
+        assert_eq!(stored.data, data, "{id}: stored data must round-trip");
+    }
 }
 
 #[test]

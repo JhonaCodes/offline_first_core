@@ -78,7 +78,10 @@ impl SharedDb {
 
     /// Exclusive access, for a reset. Poisoning is handled as in [`Self::read`].
     pub(crate) fn write(&self) -> RwLockWriteGuard<'_, AppDbState> {
-        self.state.write().unwrap_or_else(PoisonError::into_inner)
+        let state = self.state.write().unwrap_or_else(PoisonError::into_inner);
+        #[cfg(feature = "fault-injection")]
+        crate::fault_injection::trip_in_lock(crate::fault_injection::LockSite::Database);
+        state
     }
 
     /// Runs `op` on the store under the shared lock. When it fails because
@@ -165,10 +168,13 @@ impl SharedDb {
 /// single inserts and removals of `Weak` entries, so it is consistent even if
 /// a panic (for example while closing an environment) interrupted one.
 fn lock_registry() -> MutexGuard<'static, Registry> {
-    REGISTRY
+    let registry = REGISTRY
         .get_or_init(Mutex::default)
         .lock()
-        .unwrap_or_else(PoisonError::into_inner)
+        .unwrap_or_else(PoisonError::into_inner);
+    #[cfg(feature = "fault-injection")]
+    crate::fault_injection::trip_in_lock(crate::fault_injection::LockSite::Registry);
+    registry
 }
 
 /// Returns the database served at `name` (see [`db_dir_name`]), opening it

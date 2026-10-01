@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::{create_test_model, unix_timestamp_secs, TestDir};
+use common::{create_test_model, TestDir};
 use log::info;
 use offline_first_core::local_db_model::LocalDbModel;
 use serde_json::json;
@@ -86,31 +86,52 @@ fn test_memory_usage_large_dataset() {
 }
 
 #[test]
-fn test_repeated_operations_memory_stability() {
-    let dir = TestDir::new("memory_stability");
+fn test_repeated_cycles_leave_exactly_the_surviving_records() {
+    let dir = TestDir::new("repeated_cycles");
     let state = dir.open("db");
 
     for cycle in 0..10 {
         for i in 0..50 {
-            let _ = state.push(create_test_model(
-                &format!("cycle_{cycle}_record_{i}"),
-                None,
-            ));
+            state
+                .push(create_test_model(
+                    &format!("cycle_{cycle}_record_{i:02}"),
+                    None,
+                ))
+                .expect("push must succeed");
         }
-
         for i in 0..50 {
-            let _ = state.get_by_id(&format!("cycle_{cycle}_record_{i}"));
+            assert!(
+                state
+                    .get_by_id(&format!("cycle_{cycle}_record_{i:02}"))
+                    .expect("lookup must succeed")
+                    .is_some(),
+                "a pushed record must be readable"
+            );
         }
-
         for i in 0..25 {
-            let mut model = create_test_model(&format!("cycle_{cycle}_record_{i}"), None);
+            let mut model = create_test_model(&format!("cycle_{cycle}_record_{i:02}"), None);
             model.data = json!({"updated": true, "cycle": cycle});
-            let _ = state.update(model);
+            assert!(state.update(model).expect("update must succeed").is_some());
         }
-
         for i in 25..50 {
-            let _ = state.delete_by_id(&format!("cycle_{cycle}_record_{i}"));
+            assert!(state
+                .delete_by_id(&format!("cycle_{cycle}_record_{i:02}"))
+                .expect("delete must succeed"));
         }
+    }
+
+    // 25 updated survivors per cycle, nothing else.
+    let records = state.get().expect("get must succeed");
+    assert_eq!(records.len(), 10 * 25);
+    for record in records {
+        let (cycle, index) = record
+            .id
+            .strip_prefix("cycle_")
+            .and_then(|rest| rest.split_once("_record_"))
+            .expect("only the test's records exist");
+        let cycle: u64 = cycle.parse().expect("numeric cycle");
+        assert!(index.parse::<u32>().expect("numeric index") < 25);
+        assert_eq!(record.data, json!({"updated": true, "cycle": cycle}));
     }
 }
 
@@ -122,84 +143,72 @@ fn test_rapid_insert_delete_cycles() {
 
     for cycle in 0..100 {
         for i in 0..10 {
-            if state
+            state
                 .push(create_test_model(&format!("stress_{cycle}_{i}"), None))
-                .is_err()
-            {
-                info!("Insert failed at cycle {cycle} item {i}");
-            }
+                .expect("push must succeed");
         }
-
         for i in 0..10 {
-            if state.delete_by_id(&format!("stress_{cycle}_{i}")).is_err() {
-                info!("Delete failed at cycle {cycle} item {i}");
-            }
+            assert!(
+                state
+                    .delete_by_id(&format!("stress_{cycle}_{i}"))
+                    .expect("delete must succeed"),
+                "a pushed record must exist until deleted"
+            );
         }
-
-        if cycle % 20 == 0 {
-            let records = state.get().unwrap_or_default();
-            info!("After {cycle} cycles: {} records remaining", records.len());
-        }
+        assert!(
+            state.get().expect("get must succeed").is_empty(),
+            "cycle {cycle} must leave no record behind"
+        );
     }
 
     info!("Rapid cycles completed in {:?}", start.elapsed());
-    let final_records = state.get().unwrap_or_default();
-    info!("Final record count: {}", final_records.len());
 }
 
 #[test]
-fn test_bulk_operations_performance() {
-    let dir = TestDir::new("bulk_perf");
+fn test_bulk_insert_read_and_update_round_trip() {
+    let dir = TestDir::new("bulk_round_trip");
     let state = dir.open("db");
 
-    // Bulk insert
     let start = Instant::now();
     for i in 0..1000 {
         let model = create_test_model(
-            &format!("bulk_{i}"),
-            Some(json!({
-                "index": i,
-                "data": format!("bulk_data_{i}"),
-                "timestamp": unix_timestamp_secs()
-            })),
+            &format!("bulk_{i:04}"),
+            Some(json!({"index": i, "data": format!("bulk_data_{i}")})),
         );
-        if state.push(model).is_err() {
-            info!("Bulk insert failed at record {i}");
-            break;
-        }
-        if i % 100 == 0 {
-            info!("Inserted {i} records in {:?}", start.elapsed());
-        }
+        state.push(model).expect("push must succeed");
     }
-    info!("Bulk insert completed in {:?}", start.elapsed());
+    info!("Bulk insert of 1000 records in {:?}", start.elapsed());
 
-    // Bulk read
-    let read_start = Instant::now();
-    let all_records = state.get().unwrap_or_default();
-    info!(
-        "Bulk read of {} records completed in {:?}",
-        all_records.len(),
-        read_start.elapsed()
-    );
+    // Everything comes back, in id order.
+    let all_records = state.get().expect("get must succeed");
+    let ids: Vec<String> = all_records.iter().map(|record| record.id.clone()).collect();
+    let expected: Vec<String> = (0..1000).map(|i| format!("bulk_{i:04}")).collect();
+    assert_eq!(ids, expected);
 
-    // Random access: every 13th record
-    let random_start = Instant::now();
-    for i in (0..all_records.len()).step_by(13) {
-        let _ = state.get_by_id(&format!("bulk_{i}"));
+    // Random access reads the record that was written.
+    for i in (0..1000).step_by(13) {
+        let record = state
+            .get_by_id(&format!("bulk_{i:04}"))
+            .expect("lookup must succeed")
+            .expect("the record must exist");
+        assert_eq!(record.data["index"], json!(i));
     }
-    info!(
-        "Random access test completed in {:?}",
-        random_start.elapsed()
-    );
 
-    // Bulk update: every 10th record
-    let update_start = Instant::now();
-    for i in (0..all_records.len()).step_by(10) {
-        let mut model = create_test_model(&format!("bulk_{i}"), None);
+    // Updating every 10th record changes exactly those.
+    for i in (0..1000).step_by(10) {
+        let mut model = create_test_model(&format!("bulk_{i:04}"), None);
         model.data = json!({"updated": true, "original_index": i});
-        let _ = state.update(model);
+        assert!(state.update(model).expect("update must succeed").is_some());
     }
-    info!("Bulk update test completed in {:?}", update_start.elapsed());
+    for record in state.get().expect("get must succeed") {
+        let index: usize = record.id["bulk_".len()..].parse().expect("numeric id");
+        assert_eq!(
+            record.data.get("updated").is_some(),
+            index % 10 == 0,
+            "{}",
+            record.id
+        );
+    }
 }
 
 #[test]

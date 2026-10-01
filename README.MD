@@ -271,7 +271,7 @@ iOS, macOS, Linux and Windows, `dart_db` for Linux, macOS and Windows.
 | `ofc_execute(handle, request)` | Runs one request of the JSON wire protocol (statements, batches, interactive transactions, savepoints, `explain`) |
 | `ofc_free_string(ptr)` | Releases every string returned by the library |
 | `close_database(handle)` | Releases a handle; the database closes with its last handle |
-| `create_db`, `push_data`, `get_by_id`, `get_all`, `update_data`, `delete_by_id`, `clear_all_records`, `reset_database` | The 0.5 key-value API, unchanged |
+| `create_db`, `push_data`, `get_by_id`, `get_all`, `update_data`, `delete_by_id`, `clear_all_records`, `reset_database` | The 0.5 key-value API and its JSON contract. Since 0.7.2, `get_all` answers a `DatabaseError` naming a stored record it cannot decode instead of leaving it out; delete that id to recover |
 
 Every entry point catches panics (`panic = "unwind"`), handles opened on the
 same path share one environment (Flutter hot restart safe), and interactive

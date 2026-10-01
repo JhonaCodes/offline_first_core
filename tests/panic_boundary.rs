@@ -14,7 +14,9 @@ use std::ffi::c_char;
 use common::{c_string, FfiDb, FfiResponse, TestDir};
 use offline_first_core::{
     clear_all_records, close_database, create_db, delete_by_id, get_all, get_by_id,
-    ofc_fault_injection_arm, ofc_free_string, push_data, reset_database, update_data,
+    ofc_fault_injection_arm, ofc_fault_injection_arm_in_database_lock,
+    ofc_fault_injection_arm_in_registry_lock, ofc_free_string, push_data, reset_database,
+    update_data,
 };
 
 /// Requires the error envelope produced for a panic in `entry_point`.
@@ -125,4 +127,48 @@ fn test_panic_in_free_string_returns() {
     // release, so the string is still valid: decode and release it for real.
     let listed = FfiResponse::take(response);
     assert_eq!(listed.variant, "Ok");
+}
+
+#[test]
+fn test_a_poisoned_registry_lock_is_recovered() {
+    let dir = TestDir::new("poisoned_registry");
+    let name = c_string(&dir.db_name("db"));
+
+    ofc_fault_injection_arm_in_registry_lock();
+    // SAFETY: `name` is a live NUL-terminated string.
+    let failed = unsafe { create_db(name.as_ptr()) };
+    assert!(
+        failed.is_null(),
+        "the panic inside the registry lock is contained"
+    );
+
+    // The registry lock is poisoned now: opening still works.
+    let db = FfiDb::open(&dir, "db");
+    assert_eq!(db.push("after").variant, "Ok");
+    assert_eq!(db.ids(), ["after"]);
+}
+
+#[test]
+fn test_a_poisoned_database_lock_is_recovered() {
+    let dir = TestDir::new("poisoned_database");
+    let db = FfiDb::open(&dir, "db");
+    assert_eq!(db.push("before").variant, "Ok");
+
+    // `reset_database` holds the registry lock and the database write lock
+    // when the fault fires, so it poisons both.
+    ofc_fault_injection_arm_in_database_lock();
+    let response = db.reset(&dir.db_name("other"));
+    assert_eq!(response.variant, "DatabaseError", "{response:?}");
+    assert!(
+        response
+            .payload
+            .contains("fault injected inside the Database lock"),
+        "{response:?}"
+    );
+
+    // The handle keeps working, with its data, and the registry opens more.
+    assert_eq!(db.push("after").variant, "Ok");
+    assert_eq!(db.ids(), ["after", "before"]);
+    let second = FfiDb::open(&dir, "second");
+    assert_eq!(second.push("record").variant, "Ok");
 }

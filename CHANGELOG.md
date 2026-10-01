@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-10-01
+
+### Fixed
+- `get_all` (and `AppDbState::get`) no longer skips a stored record it cannot
+  decode: the listing fails with the record's id (`DbError::Utf8` or
+  `DbError::Deserialization`; over the C ABI a `DatabaseError` naming it),
+  instead of answering an incomplete list as if it were complete. Deleting
+  that id makes the listing complete again.
+
+### Added
+- Tests that seed undecodable records into a real database (JSON and UTF-8,
+  through the Rust API and the C ABI, and the recovery by deleting the id).
+- With the test-only `fault-injection` feature,
+  `ofc_fault_injection_arm_in_registry_lock` and
+  `ofc_fault_injection_arm_in_database_lock` make the next acquisition of
+  that lock panic while held; tests show that a poisoned lock is recovered
+  and the database keeps working.
+
+### Changed
+- Tests that only checked for the absence of a panic now assert results:
+  JSON edge cases round-trip, invalid database names are passed to `init`
+  for real, and the bulk and repeated-cycle tests check the exact records
+  left.
+
 ## [0.7.1] - 2026-10-01
 
 ### Changed

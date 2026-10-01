@@ -535,23 +535,30 @@ fn test_database_creation_invalid_names() {
     let dir = TestDir::new("invalid_names");
 
     let long_name = "a".repeat(256);
-    let invalid_names = [
-        "",           // Empty name
-        "/",          // Path separator
-        "\\",         // Windows path separator
-        "CON",        // Windows reserved name
-        "PRN",        // Windows reserved name
-        "AUX",        // Windows reserved name
-        "NUL",        // Windows reserved name
-        &long_name,   // Very long name
-        "db\0name",   // Null byte in name
-        "db\x01name", // Control character
+    let candidates: [(&str, &str); 10] = [
+        ("empty", ""),
+        ("slash", "/"),
+        ("backslash", "\\"),
+        ("con", "CON"),
+        ("prn", "PRN"),
+        ("aux", "AUX"),
+        ("nul_device", "NUL"),
+        ("long", &long_name),
+        ("nul_byte", "db\0name"),
+        ("control", "db\x01name"),
     ];
 
-    // Faithful to the original test: the database is named after the length
-    // of each candidate, not after the candidate itself.
-    for invalid_name in invalid_names {
-        let name = format!("invalid_db_{}", invalid_name.len());
-        assert_usable_if_opened(&name, AppDbState::init(dir.db_name(&name)));
+    for (label, candidate) in candidates {
+        // Joined as text, not with `Path::join`: `join("/")` would point at the
+        // file system root instead of the test directory.
+        let name = format!("{}/{candidate}", dir.path().display());
+        let opened = AppDbState::init(name);
+
+        // A name no file system accepts (256 bytes plus `.lmdb`, or a NUL)
+        // must fail with an error, never panic or open something else.
+        if matches!(label, "long" | "nul_byte") {
+            assert!(opened.is_err(), "{label}: must be rejected");
+        }
+        assert_usable_if_opened(label, opened);
     }
 }
